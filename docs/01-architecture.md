@@ -30,17 +30,20 @@ The Vue app talks to Supabase **directly** via `supabase-js`. Per-user authoriza
 
 ## 4. The storage-provider seam
 
-A small **provider** abstraction sits between the rest of the app and the actual backend, so the app never knows which backend is in use. There are two seams:
+A small **provider** abstraction sits between the rest of the app and the actual backend, so the app never knows which backend is in use. Both providers live in `src/services/storage/`. There are two seams:
 
-1. **Document seam** — the GeoJSON blob. Today wraps `dexieStorage`; routes to a Supabase-backed `RemoteStorageManager` when logged in.
+1. **File seam** — the active GeoJSON blob (today the `geojson_data` / `backup_geojson_data` records). Today wraps `dexieStorage`; routes to a Supabase-backed `RemoteStorageManager` when logged in.
 2. **Settings KV seam** — templates/bookmarks/preferences. Today wraps `localStorage`; routes to a Supabase-backed implementation when logged in.
 
-Both expose the same minimal interface: `getItem(key)`, `setItem(key, value)`, `removeItem(key)`, `clear()`.
+Both expose the same minimal **method surface** — `getItem(key)`, `setItem(key, value)`, `removeItem(key)`, `clear()` — but they differ in timing, and that difference is load-bearing:
+
+- The **File seam is async** (IndexedDB/Dexie is async; every consumer already `await`s it). Wrapping it is trivial.
+- The **Settings seam is synchronous**, and is *consumed synchronously*: Pinia stores read `localStorage` inside their synchronous `state()` factories (e.g. `measurements.js`, `session.js`), so state is materialised at store-construction time. A promise cannot feed that without changing store semantics — which would break the Phase 0 no-op. **The Phase 0 settings provider is therefore synchronous, a 1:1 mirror of `localStorage`.** This does not block Phase 2 (see [`02-decisions.md`](02-decisions.md) ADR-010).
 
 ### Current coupling (what Phase 0 refactors)
 
-- **Document storage** — the `dexieStorage` singleton (`src/services/file/dexie-storage-manager.js`) is imported directly in ~5 call sites: `file-service.js` (primary), `auto-save-service.js`, `map-utils.js`, `draw-manager.js`, `MapView.vue`. Clean, contained seam.
-- **Settings** — `localStorage` is called **directly in 43 places across 11 files** (see appendix). **No abstraction exists.** Introducing one is the bulk of Phase 0.
+- **File storage** — the `dexieStorage` singleton (`src/services/file/dexie-storage-manager.js`) is imported directly by **4 sites**: `file-service.js` (primary), `map-utils.js`, `MapView.vue`, and `draw-manager.js`. `auto-save-service.js` is **already decoupled** — it receives its storage manager by constructor injection from `draw-manager.js`, so routing it through the seam is a one-line change to what `draw-manager` injects. Clean, contained seam.
+- **Settings** — `localStorage` is called **directly in 45 places across 12 files** (see appendix). **No abstraction exists.** Introducing one is the bulk of Phase 0. Of these, `session.js` (6 calls, the auth credential) **stays on raw `localStorage`** outside the seam (ADR-008 / ADR-011) — leaving **39 calls across 11 files** to migrate.
 
 This client-side seam is also what delivers the "don't couple the app to Supabase" benefit *without* a server hop — the rest of the app depends on the seam, not on `supabase-js`.
 
@@ -106,27 +109,35 @@ Unchanged in v1. It keeps serving format conversions and the Turnstile `/session
 
 ## Appendix — files
 
-### Document storage seam (~5 sites)
-- `src/services/file/dexie-storage-manager.js` (the singleton)
-- `src/constants/storage-constants.js` (`geojson_data`, `backup_geojson_data`)
-- `src/services/file/file-service.js` (primary consumer)
-- `src/services/auto-save/auto-save-service.js`
-- `src/utils/map-utils.js`
-- `src/services/draw/draw-manager.js`
-- `src/views/MapView.vue`
+> Counts verified against the `staging` branch on 2026-06-25; the original "~5 sites" / "43 across 11" figures had drifted.
 
-### Settings seam — 43 direct `localStorage` calls across 11 files
-- `src/stores/styling-template.js`
-- `src/stores/side-panel.js`
-- `src/stores/session.js`
-- `src/stores/measurements.js`
-- `src/stores/colour-mode.js`
-- `src/stores/app-hint.js`
-- `src/components/widgets/Bookmarks.vue`
-- `src/components/map/MapStyleSwitcher.vue`
-- `src/components/file/WelcomeSplashDialog.vue`
-- `src/components/file/NarrowScreenWarningDialog.vue`
-- `src/utils/map-utils.js`
+### File seam — the `dexieStorage` singleton + its consumers
+- `src/services/file/dexie-storage-manager.js` (the singleton)
+- `src/constants/storage-constants.js` (`geojson_data`, `backup_geojson_data` keys)
+- `src/services/file/file-service.js` (primary consumer, ~10 calls)
+- `src/utils/map-utils.js` (1 call; also a settings-seam consumer)
+- `src/views/MapView.vue` (1 call)
+- `src/services/draw/draw-manager.js` (no direct blob I/O — it *injects* `dexieStorage` into `AutoSaveService`)
+- `src/services/auto-save/auto-save-service.js` (already decoupled via constructor injection; not a direct importer)
+
+### Settings seam — 45 direct `localStorage` calls across 12 files
+Migrated to the seam (39 calls / 11 files):
+- `src/stores/side-panel.js` (17)
+- `src/stores/measurements.js` (5)
+- `src/components/file/WelcomeSplashDialog.vue` (4)
+- `src/stores/styling-template.js` (2)
+- `src/stores/colour-mode.js` (2)
+- `src/stores/app-hint.js` (2)
+- `src/stores/undo-new-file-toast.js` (2) — *added since the original survey*
+- `src/components/widgets/Bookmarks.vue` (2)
+- `src/components/map/MapStyleSwitcher.vue` (1)
+- `src/components/file/NarrowScreenWarningDialog.vue` (1)
+- `src/utils/map-utils.js` (1; also a file-seam consumer)
+
+Deliberately **not** migrated:
+- `src/stores/session.js` (6) — the auth credential; stays on raw `localStorage` (ADR-008 / ADR-011).
+
+Note: `src/stores/features-list.js` surfaces in a naive `localStorage` text search but references it only in **comments** — it has no real call sites and is not part of this work.
 
 ### Existing backend / session
 - `src/config/index.js` (`VITE_API_HOST`)

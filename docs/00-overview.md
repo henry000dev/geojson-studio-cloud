@@ -1,6 +1,6 @@
 # 00 — Overview
 
-> **Status:** planning / parked. No code written yet.
+> **Status:** implementation underway — Phase 0 (provider seams). See [`05-worklog.md`](05-worklog.md) for current state.
 > **Epic:** Cloud. **Brand:** "Cloud" (user-facing); "Paid Plans" is a sub-stream.
 > **This doc:** the read-me-first. Problem, goals, glossary, and the two-paths summary. For the technical design see [`01-architecture.md`](01-architecture.md); for *why* each choice was made see [`02-decisions.md`](02-decisions.md); for the plan see [`03-rollout.md`](03-rollout.md).
 
@@ -64,8 +64,8 @@ Because the paths are isolated, a cloud bug **cannot corrupt** the anonymous pat
 - **Project** — *not adopted.* Reserved for a possible future per-file-context model.
 - **The flag** — a runtime URL-param feature flag that reveals the login UI; ships the account code "dark" until enabled.
 - **Anonymous path / local path** — the existing IndexedDB + `localStorage` experience.
-- **The seam** — the storage-provider abstraction that lets the app swap local vs remote backends without knowing which is in use.
+- **The seam(s)** — the storage-provider abstraction that lets the app swap local vs remote backends without knowing which is in use. Two of them: the **File seam** (the active GeoJSON blob) and the **Settings seam** (templates/bookmarks/prefs). See [`01-architecture.md`](01-architecture.md#4-the-storage-provider-seam).
 
 ## Current status
 
-Planning complete and agreed. Next concrete action: **Phase 0** — introduce the storage and settings provider seams as a behaviour-preserving no-op, validated by the existing Playwright suite passing unchanged. See [`05-worklog.md`](05-worklog.md) for the running status.
+Planning complete and agreed; the `geojson-studio-app` code has been surveyed and the docs reconciled to it (2026-06-25). **Phase 0 is in progress** — introducing the File and Settings provider seams as a behaviour-preserving no-op, validated by the existing Playwright suite passing unchanged. See [`05-worklog.md`](05-worklog.md) for the running status.

@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-06-25 — Pre-Phase-0 code survey; docs reconciled; starting the seams
+
+Surveyed the actual `geojson-studio-app` `staging` branch before writing any code, and reconciled the design docs with what's really there:
+
+- **File seam (was "Document seam" — renamed for consistency with the "file" glossary term):** 4 direct `dexieStorage` importers — `file-service`, `map-utils`, `MapView`, `draw-manager`. `auto-save-service` is **already decoupled** via constructor injection, so it rides along when `draw-manager` injects the provider. (The doc previously said "~5 sites", lumping auto-save in as a direct importer.)
+- **Settings seam:** 45 direct `localStorage` calls across 12 files (doc said 43/11). `undo-new-file-toast.js` is new since the original survey; `features-list.js` only mentions `localStorage` in comments (not a call site). `session.js` (6 calls) stays on raw `localStorage`, outside the seam.
+- **Key finding:** the settings seam must be **synchronous** — Pinia stores read `localStorage` in their sync `state()` factories, so an async seam would change store semantics and break the no-op. Recorded as **ADR-010**; the session-stays-local refinement is **ADR-011**.
+
+Updated `00-overview.md` (status + glossary), `01-architecture.md` (§4 + appendix; "Document seam" → "File seam"), `03-rollout.md` (Phase 0), and appended ADR-010/011 to `02-decisions.md`.
+
+### Where to resume
+- **Next action:** Phase 0, Step 1 — add `src/services/storage/file-storage.js` wrapping `dexieStorage`, repoint the 4 importers (+ `draw-manager`'s injection into `AutoSaveService`). Branch `feat/cloud-step0-seam` off `staging`. Then the settings seam in per-store batches. Validate with the Playwright e2e suite (`npm run test:e2e`).
+
+---
+
 ## 2026-06-23 — Planning complete; planning repo set up
 
 - Agreed the full architecture and rollout for the Cloud epic (see [`00-overview.md`](00-overview.md) through [`04-backlog.md`](04-backlog.md)).

@@ -19,10 +19,11 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 ## Phase 0 — Branch by abstraction (no flag, no user-visible change)
 
+- **Branch:** `feat/cloud-step0-seam` off `staging` in `geojson-studio-app` (api untouched).
 - **Goal:** introduce the provider seams while keeping behaviour identical.
-- **Work:**
-  - Document storage provider wrapping `dexieStorage`; route the ~5 call sites through it.
-  - Settings KV provider wrapping `localStorage`; refactor the **43 direct calls across 11 files** onto it (the mechanical bulk of this phase).
+- **Work** (incremental — one provider, then consumers migrated in small per-store batches with tests green between each; see [`05-worklog.md`](05-worklog.md)):
+  - File-storage provider (`src/services/storage/file-storage.js`) wrapping `dexieStorage`; repoint the **4 direct importers** (`file-service`, `map-utils`, `MapView`, `draw-manager`). `auto-save-service` needs no change — `draw-manager` simply injects the provider instead of `dexieStorage`.
+  - Settings-KV provider (`src/services/storage/settings-storage.js`), **synchronous**, wrapping `localStorage`; refactor the **39 direct calls across 11 files** onto it (the mechanical bulk of this phase). `session.js` (the auth credential) stays on raw `localStorage`, outside the seam (ADR-008 / ADR-011).
   - Both providers always return the local implementation. No remote, no auth check, no flag yet.
 - **Validation:** the existing Playwright e2e suite passes unchanged — the proof this is a true no-op.
 - **Risk:** very low (pure refactor under existing coverage).

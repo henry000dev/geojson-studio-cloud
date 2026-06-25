@@ -95,3 +95,23 @@ Format per record: **Status · Context · Decision · Rationale · Alternatives 
 - **Rationale:** This material belongs to neither app nor api. A dedicated repo (not a folder in `resources`) keeps evolving planning/schema separate from static assets and gives it its own history. Named after the **brand** so the technical and product names are unified.
 - **Alternatives rejected:** Folder inside `geojson-studio-resources` (mixes concerns); plain non-git folder (loses history); a single monolithic `cloud-accounts-plan.md` (volatile and stable content churn together).
 - **Consequences:** Each code repo carries a one-line pointer back to this repo. Branch strategy is short-lived per-phase branches off `staging` with the **same branch name across both code repos** — not one mega-branch (see [`03-rollout.md`](03-rollout.md)).
+
+## ADR-010 — The settings-KV seam is synchronous
+
+- **Status:** Accepted.
+- **Context:** Phase 0 introduces a settings provider in front of `localStorage`. The eventual Supabase-backed implementation (Phase 2) is necessarily async. The instinct is to make the seam async now so both implementations share one shape.
+- **Decision:** The settings seam is **synchronous** in Phase 0 — a 1:1 mirror of the `localStorage` API.
+- **Rationale:** Settings are consumed synchronously. Pinia stores read `localStorage` inside their synchronous `state()` factories (e.g. `measurements.js`, `session.js`, `undo-new-file-toast.js`), materialising state at store-construction time. Converting the seam to async would force every such store to hydrate from a promise — changing store semantics and initial-render behaviour, and breaking the Phase 0 "behaviour-preserving no-op" that the Playwright suite is meant to prove. The file seam is async only because Dexie already is and every consumer already awaits it; the two seams need not share timing, only their method names.
+- **Alternatives rejected:**
+  - **Async settings seam now:** rejected — turns a mechanical no-op into a semantics-changing refactor of every settings store, defeating the point of Phase 0.
+- **Consequences:** Phase 2 keeps the sync interface by hydrating a user's settings into an in-memory cache once on login (async), after which `getItem` reads the cache and `setItem` writes the cache plus a background flush to Supabase. Settings are small KV pairs, so caching them wholesale on login is cheap. The file seam stays async throughout.
+
+## ADR-011 — The session store stays on raw localStorage, outside the settings seam
+
+- **Status:** Accepted. Refines [ADR-008](#adr-008--the-session-jwt-always-stays-local).
+- **Context:** Phase 0 routes settings `localStorage` access through the new settings seam. `stores/session.js` holds the Turnstile session JWT in `localStorage`. The settings seam is exactly the abstraction that gains a remote (Supabase) branch in Phase 2.
+- **Decision:** `session.js` is **not** migrated to the settings seam; it continues to call `localStorage` directly.
+- **Rationale:** ADR-008 already mandates that the session credential never leaves the device. Keeping it off the seam makes that guarantee **structural** rather than a per-key exception someone must remember when wiring up remote routing — the credential simply never touches the code path that can reach the cloud. It is already cleanly isolated (one store, two constants), so excluding it costs nothing.
+- **Alternatives rejected:**
+  - **Migrate `session.js` to the seam and pin its keys to local in Phase 2:** rejected — relies on a per-key carve-out in the cloud-routing logic; one mistake leaks a credential. Structural exclusion is safer for zero extra effort.
+- **Consequences:** The settings-seam migration covers 11 files / 39 calls, not 12 / 45. When Supabase Auth lands (Phase 1+), its session token likewise stays in the SDK/`localStorage` store, never the settings seam.
