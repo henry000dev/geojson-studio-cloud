@@ -89,11 +89,11 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 ## Flag mechanics
 
-- URL param `?ff=cloud` is detected on app start and persisted to `localStorage` (e.g. `ff_cloud=1`).
-- A small reactive flag store reads `localStorage` and exposes `cloudEnabled`.
+- **URL-presence-based, not persisted (ADR-015):** `cloudEnabled` is simply whether `?ff=cloud` is in the URL at load. No `localStorage`, no `:off` param, no URL-stripping. Default (no param) = the app behaves exactly as before; removing the param turns cloud off.
+- A small reactive flag store reads the URL once and exposes `cloudEnabled`.
 - **Only one thing is gated:** whether the login/account UI is visible. Everything downstream composes — without login there's no auth state, so the providers stay on local.
-- Optional: a way to clear the flag (`?ff=cloud:off`, or a dev-tools clear).
-- **Visibility, not security:** even if discovered, the param only reveals a login form; Auth + RLS are the real gate.
+- **OAuth round-trip:** the Google redirect carries `ff=cloud` back via `redirectTo`, so the account UI survives the return load. The Supabase session itself persists in the SDK store but is only *surfaced* when the flag is present.
+- **Visibility, not security:** even if discovered, the param only reveals a login form; Auth + RLS are the real gate. The bare domain is always vanilla, so the dark feature can never stick on a casual visitor's browser.
 - **Truly dark:** lazy-init Supabase, code-split the account module, no side effects on app start when off.
 - **Temporary scaffolding:** at public launch, flip the default on and delete the flag so the path becomes unconditional. Don't let flags accumulate.
 

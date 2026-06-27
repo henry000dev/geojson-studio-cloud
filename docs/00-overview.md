@@ -1,6 +1,6 @@
 # 00 — Overview
 
-> **Status:** implementation underway — Phase 0 (provider seams). See [`05-worklog.md`](05-worklog.md) for current state.
+> **Status:** Phase 0 complete (provider seams in). Phase 1 (Supabase Auth, dark behind the flag) next. See [`05-worklog.md`](05-worklog.md).
 > **Epic:** Cloud. **Brand:** "Cloud" (user-facing); "Paid Plans" is a sub-stream.
 > **This doc:** the read-me-first. Problem, goals, glossary, and the two-paths summary. For the technical design see [`01-architecture.md`](01-architecture.md); for *why* each choice was made see [`02-decisions.md`](02-decisions.md); for the plan see [`03-rollout.md`](03-rollout.md).
 
@@ -68,4 +68,4 @@ Because the paths are isolated, a cloud bug **cannot corrupt** the anonymous pat
 
 ## Current status
 
-Planning complete and agreed; the `geojson-studio-app` code has been surveyed and the docs reconciled to it (2026-06-25). **Phase 0 is in progress** — introducing the File and Settings provider seams as a behaviour-preserving no-op, validated by the existing Playwright suite passing unchanged. See [`05-worklog.md`](05-worklog.md) for the running status.
+Planning complete and agreed; the `geojson-studio-app` code surveyed and docs reconciled (2026-06-25). **Phase 0 is complete** — the File and Settings provider seams are in place as a behaviour-preserving no-op. **Phase 1 (Supabase Auth + login UI, dark behind the flag) is next.** See [`05-worklog.md`](05-worklog.md) for the running status.
