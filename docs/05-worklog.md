@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-06-29 — Phase 3 design agreed (ADR-018); ready to implement Slice 3a
+
+Design session for Phase 3 (multi-file "My Files") — **no code yet.** Walked the real app flows (`FileToolbar` New/Import, `file-service`, `auto-save-service`, `FileInfo`, `FileImportDialog`) and agreed the multi-file model. Recorded as **ADR-018**; Phase 3 re-sliced in [`03-rollout.md`](03-rollout.md); deferrals parked in [`04-backlog.md`](04-backlog.md).
+
+**Decisions:**
+- **Lazy, non-destructive File→New (cloud):** New starts a blank file; the row is inserted on the first edit. The previous file persists as its own row → the destructive "replace" confirm is dropped in cloud mode.
+- **`backup_geojson` vestigial in cloud:** revert = reopen the previous file from My Files; the backup/undo-new-file machinery stays **local-only** (gated at the orchestration layer, not the seam). Column left in place, dropped later.
+- **Provider rewrite (ships with `0002`):** active-row-**by-id** get/set/remove; serialised lazy-insert on first write; **UPDATE-by-id not upsert** (closes the switch/delete races); `clear()` made safe. `0002` drops `files_one_per_user_uq`, adds `name`.
+- **Active file:** cold load opens the most-recently-updated row (none → blank); switching is in-place (clear + reset undo/redo + load, pending autosave flushed first); delete-active → blank editor; **open/import stay writable**.
+- **First-login migration:** opt-in prompt when **cloud files == 0 AND local non-empty** → yes copies local into the first cloud file; self-extinguishing (no flag).
+- **Unchanged:** bookmarks/templates user-global; multi-tab last-write-wins (no sync).
+
+**Does NOT complicate the storage seam:** the active-document I/O (autosave/load) stays uniform across both paths; the one branch is at the New-file orchestration (a genuinely different feature), and the cloud branch is the simpler one. Confirmed `fileStorage.clear()` has no app caller today (so the "delete all files" footgun isn't currently reachable — still being made safe).
+
+### Where to resume — Phase 3 · Slice 3a
+- Author `supabase/migrations/0002_multi_file.sql` (drop `files_one_per_user_uq`, add `name`); user applies to non-prod. Rewrite `remote-file-storage.js` → by-id + serialised lazy-insert + UPDATE-by-id + safe `clear()`. Add `src/stores/active-file.js` (active id + list + lifecycle + `ensureResolved()` most-recent-on-load) and wire `file-storage.js` routing. Prove the multi-file round-trip before any UI (3b).
+
+---
+
 ## 2026-06-28 — Phase 2 · Slice 2b: settings remote provider (hydrate-on-login cache)
 
 File round-trip + two-account RLS verified by the user. Built the cloud **settings** backend, keeping the seam synchronous (ADR-010) with **per-key routing** (architecture §6).

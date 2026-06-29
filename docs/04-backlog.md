@@ -23,3 +23,16 @@
 - **Privacy policy + terms of service** — required before opening accounts to real users.
 - **Account deletion + data export** — GDPR-style flows; define and implement before/at the beta.
 - **Backup tier** — confirm Supabase backup/retention settings when provisioning for real.
+
+## Phase 3 follow-ups (deferred UI/UX & cleanup)
+
+> Parked during the Phase 3 design ([ADR-018](02-decisions.md#adr-018--phase-3-multi-file-model-and-file-lifecycle)). None block the multi-file round-trip; pick up after 3a–3c land.
+
+- **Import as a new named file** — import currently replaces the *active* file's content; instead create a *new* file named from the source filename (`roads.geojson` → "roads"), with an optional name-override field in the import dialog.
+- **File Info metadata** — show name, created date, and last-edited date alongside the existing feature/size/bounds stats.
+- **Export default filename** — default the export filename to `<file name>.geojson` rather than the generic name.
+- **Drop the `backup_geojson` column** — a cleanup migration once cloud File→New is confirmed non-destructive (the column is vestigial in cloud — ADR-018).
+- **Last-opened-file pointer** — persist the active file so a cold browser refresh reopens the exact file being viewed (v1 reopens the most-recently-updated row).
+- **My Files at scale** — search/filter + pagination for users with many files (v1 is a simple most-recent-first list).
+- **Migration dismissed-flag** — let a user permanently dismiss the first-login "save local work" prompt (v1 re-offers while cloud files == 0).
+- **Open-on-read-only option** — open a file read-only rather than writable (v1 opens writable, like New/Import).

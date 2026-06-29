@@ -54,14 +54,27 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 ## Phase 3 — Multiple files UI ("My Files")
 
-- **Goal:** logged-in users can save and switch between multiple files.
-- **Work:**
-  - Support multiple rows per user (`name`, `created_at`, `updated_at`).
-  - Add an "active file" concept to Pinia state.
-  - Build the **My Files** browser with `GsDialog` (see `.claude/docs/ui-conventions.md`): list / open / rename / delete / create-new.
-  - On first login, prompt **"Save your current local work as your first file?"** — the opt-in, per-user migration.
-- **Validation:** dev account can create several files, switch, rename, delete; anonymous user unaffected throughout.
-- **Risk:** medium — the largest new UI surface, but a standard dialog + state.
+- **Goal:** logged-in users can save and switch between multiple named files; the anonymous/local path is untouched.
+- **Design:** see [ADR-018](02-decisions.md#adr-018--phase-3-multi-file-model-and-file-lifecycle) — lazy non-destructive files, an active-row-by-`id` provider, no cloud backup, an opt-in first-login migration. Sliced like Phase 2 (build green between slices; git + e2e run by the user).
+
+### Slice 3a — schema + by-id provider + active-file state (the round-trip)
+
+- `supabase/migrations/0002_multi_file.sql`: **drop** `files_one_per_user_uq`, **add** `name`. (Applied to non-prod by the user.)
+- `src/stores/active-file.js`: holds `activeFileId` + file-list metadata; actions list / open / createNew / rename / remove; `ensureResolved()` picks the most-recently-updated row on cold load (mirrors `auth.ensureInitialised()`).
+- Rewrite `remote-file-storage.js` to operate on the **active row by `id`**: getItem/setItem/removeItem by id; serialised lazy-insert on first write with no active file; **UPDATE-by-id, not upsert**; `clear()` made safe. Ships **with** the migration (the old upsert/`maybeSingle()` break once a second row exists).
+- No UI yet — prove the multi-file round-trip in code / devtools.
+
+### Slice 3b — "My Files" dialog + FileToolbar wiring
+
+- `MyFilesDialog.vue` on `GsDialog` (see `.claude/docs/ui-conventions.md`): list (name + last-edited) / open / rename / delete / new; the active file is badged; most-recent first. Opened from a **My Files** button in `FileToolbar` (logged-in only), which also shows the active file's **name**.
+- Cloud File→New becomes **non-destructive** (no backup, no replace-confirm); the existing destructive-New + backup/undo-toast path is gated to **local mode**. Switching is **in-place** (clear + reset undo/redo + load; pending autosave flushed first). Open & Import stay **writable**. Deleting the active file → blank editor.
+
+### Slice 3c — first-login opt-in migration
+
+- On login with **zero cloud files** AND **non-empty local work**, prompt **"Save your current local work as your first file?"** → yes copies the local GeoJSON into a new cloud file; no leaves local untouched (it reappears on logout). Zero-files trigger, self-extinguishing (ADR-018).
+
+- **Validation:** dev account can create several files, switch, rename, delete; the **two-account RLS isolation** still holds with multiple rows (a list returns only the caller's files); anonymous user unaffected throughout.
+- **Risk:** medium — the largest new UI surface plus the provider/race work; a standard dialog + state otherwise.
 
 ## Phase 4 — Free beta / early access
 
