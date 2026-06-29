@@ -30,7 +30,7 @@ The Vue app talks to Supabase **directly** via `supabase-js`. Per-user authoriza
 
 ## 4. The storage-provider seam
 
-A small **provider** abstraction sits between the rest of the app and the actual backend, so the app never knows which backend is in use. Both providers live in `src/services/storage/`. There are two seams:
+A small **provider** abstraction sits between the rest of the app and the actual backend, so the app never knows which backend is in use. Both providers live in `src/services/storage/`, organised into `file/` and `settings/` subfolders (each holding that seam plus its local/remote backends). There are two seams:
 
 1. **File seam** — the active GeoJSON blob (today the `geojson_data` / `backup_geojson_data` records). Today wraps `dexieStorage`; routes to a Supabase-backed `RemoteStorageManager` when logged in.
 2. **Settings KV seam** — templates/bookmarks/preferences. Today wraps `localStorage`; routes to a Supabase-backed implementation when logged in.
@@ -42,7 +42,7 @@ Both expose the same minimal **method surface** — `getItem(key)`, `setItem(key
 
 ### Current coupling (what Phase 0 refactors)
 
-- **File storage** — the `dexieStorage` singleton (`src/services/file/dexie-storage-manager.js`) is imported directly by **4 sites**: `file-service.js` (primary), `map-utils.js`, `MapView.vue`, and `draw-manager.js`. `auto-save-service.js` is **already decoupled** — it receives its storage manager by constructor injection from `draw-manager.js`, so routing it through the seam is a one-line change to what `draw-manager` injects. Clean, contained seam.
+- **File storage** — the `dexieStorage` singleton (`src/services/storage/file/browser-file-storage.js`) is imported directly by **4 sites**: `file-service.js` (primary), `map-utils.js`, `MapView.vue`, and `draw-manager.js`. `auto-save-service.js` is **already decoupled** — it receives its storage manager by constructor injection from `draw-manager.js`, so routing it through the seam is a one-line change to what `draw-manager` injects. Clean, contained seam.
 - **Settings** — `localStorage` is called **directly in 45 places across 12 files** (see appendix). **No abstraction exists.** Introducing one is the bulk of Phase 0. Of these, `session.js` (6 calls, the auth credential) **stays on raw `localStorage`** outside the seam (ADR-008 / ADR-011) — leaving **39 calls across 11 files** to migrate.
 
 This client-side seam is also what delivers the "don't couple the app to Supabase" benefit *without* a server hop — the rest of the app depends on the seam, not on `supabase-js`.
@@ -91,17 +91,11 @@ create policy "owner deletes" on public.files for delete using (auth.uid() = use
 
 ## 6. What moves to the cloud vs stays local
 
-For logged-in users, settings migrate to Supabase **selectively** — device-level preferences stay local even when logged in.
+For logged-in users, **all settings follow the account** (ADR-017) — every settings-seam key is stored per-user in Supabase. The original plan kept "device-level" prefs local; that was a soft default and has been superseded.
 
-| Move to Supabase (account data — follows the user) | Stay local (device-level) |
-|---|---|
-| Bookmarks | Supabase session JWT (**must** stay local) |
-| Styling templates | Dark / colour mode |
-| Basemap choice | "Welcomed" splash dismissed flag |
-| Side-panel label / sort / filter preferences | App hint dismissed flag |
-| Measurement units | Narrow-screen warning dismissed flag |
+The **only** thing that stays device-local is the **Supabase session JWT** — and that is not a setting: it's a credential that never passes through the settings seam (raw `localStorage` in `stores/session.js`; **must** stay local — ADR-008 / ADR-011).
 
-This split is a sensible default; revisit per key during Phases 2–3 as keys are actually migrated.
+> **Phase 2 · Slice 2b — implemented (ADR-017).** The settings seam routes **all** keys to the cloud cache when logged in (`src/services/storage/settings/settings-storage.js`); no per-key allowlist. Keys that now follow the account include `map_style`, `bookmarks`, `unit_system`, the side-panel prefs, `stylingTemplates`, plus the formerly-local `colour_mode`, `welcomed`, `app_hint_visible`, `measurements_while_drawing`, `undo_new_file_toast_enabled`. (Note: there is no separate "narrow-screen warning" key in code — that dialog reuses `welcomed`.) The synchronous interface is preserved by an in-memory cache hydrated before mount (ADR-010).
 
 ## 7. Where the existing Node API fits
 
@@ -114,7 +108,7 @@ Unchanged in v1. It keeps serving format conversions and the Turnstile `/session
 > Counts verified against the `staging` branch on 2026-06-25; the original "~5 sites" / "43 across 11" figures had drifted.
 
 ### File seam — the `dexieStorage` singleton + its consumers
-- `src/services/file/dexie-storage-manager.js` (the singleton)
+- `src/services/storage/file/browser-file-storage.js` (the singleton)
 - `src/constants/storage-constants.js` (`geojson_data`, `backup_geojson_data` keys)
 - `src/services/file/file-service.js` (primary consumer, ~10 calls)
 - `src/utils/map-utils.js` (1 call; also a settings-seam consumer)

@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-06-28 — Phase 2 · Slice 2b: settings remote provider (hydrate-on-login cache)
+
+File round-trip + two-account RLS verified by the user. Built the cloud **settings** backend, keeping the seam synchronous (ADR-010) with **per-key routing** (architecture §6).
+
+- **`settings-cache.js`** (new, light / main bundle) — in-memory `Map` + a synchronous `localStorage`-shaped backend; writes schedule a fire-and-forget background flush via an installed flusher. **No SDK import**, so it's main-bundle-safe.
+- **`cloud-settings-bootstrap.js`** (new, dynamic / flag-on) — awaits auth; if logged in, hydrates all `user_settings` rows into the cache and installs the flusher (`upsert` on `(user_id,key)`; delete on remove/clear). Fails safe to local on error.
+- **`settings-storage.js`** — per-key routing via a `CLOUD_SETTINGS_KEYS` allowlist: cloud only when the cache is active **and** the key is allowlisted; otherwise `localStorage`. Still fully synchronous.
+- **`main.js`** — when the flag is on, dynamically import + `await initCloudSettings()` **before `app.mount()`**, so the cache is populated when stores read it in their `state()` factories. Flag off mounts synchronously (unchanged).
+
+**Classification (architecture §6).** CLOUD (follows the user): `map_style`, `bookmarks`, `unit_system`, the four side-panel keys (`feature_label_property`, `feature_sort_option`, `feature_filter_property`, `filter_sync_map`), `stylingTemplates`. LOCAL (device-level): `colour_mode`, `welcomed`, `app_hint_visible`, narrow-screen flag, plus two **judgment calls** — `measurements_while_drawing` and `undo_new_file_toast_enabled` (treated as device/workflow toggles, not in §6's move list). *Flagged for user confirmation.*
+
+> **Revised same-day (ADR-017):** user decided **all** settings should follow the account. Dropped the `CLOUD_SETTINGS_KEYS` allowlist — the settings seam now routes **every** key to the cloud cache when logged in (`resolveBackend()` again, no key check). The session credential stays local automatically (it's outside the seam — ADR-008/011). Also noted: there is no distinct "narrow-screen" key in code (the dialog reuses `welcomed`). Rebuilt clean.
+
+> **Housekeeping:** moved the file seam's local backend from `services/file/dexie-storage-manager.js` → `services/storage/browser-file-storage.js` (file rename only — code identifiers `dexieStorage`/`DexieStorageManager` unchanged), so it sits beside its remote sibling (`remote-file-storage.js`). `services/storage/` is now the whole persistence layer; `services/file/` stays file domain logic. One import path updated (`file-storage.js`); build clean.
+
+> **Housekeeping:** organised `services/storage/` into two subfolders — `file/` (`file-storage.js`, `browser-file-storage.js`, `remote-file-storage.js`) and `settings/` (`settings-storage.js`, `settings-cache.js`, `cloud-settings-bootstrap.js`). File moves + import-path updates only (all `@/` alias paths; ~15 importers across `src/`); no other code changes. Build clean.
+
+**Isolation:** a fresh cloud account starts with empty cloud settings; local settings are untouched and reappear on logout (ADR-004). Opt-in local→cloud migration is Phase 3.
+
+**Build:** clean. `cloud-settings-bootstrap-*.js` + `remote-file-storage-*.js` + `supabase-client-*.js` are separate async chunks, none in main. e2e (flag off) unaffected.
+
+### Where to resume — Phase 3
+- Multi-file "My Files" UI; **drop `files_one_per_user_uq`**, add `name`; the opt-in "save your current local work as your first file?" migration on first login. (Phase 2 is functionally complete once settings are verified.)
+
+---
+
+## 2026-06-28 — Phase 2 · Slice 2: remote file provider + auth-state routing
+
+Schema applied to non-prod by the user and verified. Built the remote **file seam** and wired routing by auth state — **no call-site changes** (the Phase 0 seam paying off).
+
+- **`src/services/storage/remote-file-storage.js`** (new) — Supabase backend implementing `getItem/setItem/removeItem/clear` against `public.files`. The two seam keys map to columns (`geojson_data`→`geojson`, `backup_geojson_data`→`backup_geojson`) on the user's single row; writes are `upsert` on `user_id` (preserving the other column); `removeItem` nulls a column; `clear` deletes the row. RLS scopes everything to the owner. Statically imports the SDK, so it's only reached via dynamic import → its own async chunk.
+- **`src/services/storage/file-storage.js`** — `resolveBackend()` is now async: flag OFF → `dexieStorage` immediately (never touches auth/Supabase, still dark); flag ON → `await auth.ensureInitialised()` then route (logged-in → dynamically-imported `remoteFileStorage`, else local). Awaiting auth on the first read fixes the **startup race** so a logged-in user loads their cloud file, not stale local data.
+- **`src/stores/auth.js`** — `init()` → **`ensureInitialised()`**: idempotent, awaitable, shares one module-level init promise between the account UI and the file seam.
+- **`AccountMenu.vue` / `LoginDialog.vue`** — reload on sign-in success and after sign-out, so the app re-bootstraps cleanly on the correct storage path (the two paths never mix in-memory; also discards any pending local autosave timer so anonymous data can't leak to cloud). Google OAuth already reloads via redirect, and the startup await handles its return.
+
+**Build:** clean. Chunks: `remote-file-storage-*.js` (~0.9 kB) + `supabase-client-*.js` (~202 kB) are separate async chunks; main bundle +~2 kB (light auth/flags stores), **no SDK in main**. Flag-off = unchanged, so the existing e2e (anonymous) is unaffected.
+
+**Not yet verified — the security gate (do before trusting this):**
+1. **Round-trip:** flag on, sign in, draw something (autosaves to cloud), reload → it persists; sign out → local data returns.
+2. **Two-account RLS isolation:** sign in as A, save; sign in as B → B sees empty/their own, never A's; confirm in the Supabase Table Editor that each row's `user_id` matches, and that the SQL `set local role anon` check still denies.
+
+### Where to resume — Phase 2 · Slice 2b
+- Settings remote provider against `public.user_settings` + the **hydrate-on-login in-memory sync cache** (ADR-010), keeping the settings seam synchronous. Then Phase 3 (multi-file UI; drop `files_one_per_user_uq`; add `name`).
+
+---
+
 ## 2026-06-27 — Phase 2 · Slice 1: cloud schema + RLS authored (not yet applied)
 
 First Phase 2 slice — **schema + Row-Level Security only**, no app code. Authored `supabase/migrations/0001_files_and_user_settings.sql` (+ `supabase/migrations/README.md`) as the source of truth (ADR-009):

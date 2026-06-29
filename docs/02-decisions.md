@@ -174,3 +174,14 @@ Format per record: **Status · Context · Decision · Rationale · Alternatives 
   - **Backup stays local in cloud mode:** rejected — violates ADR-004 (no IndexedDB for logged-in users).
   - **Multi-row `files` + `name` now:** rejected — unused in Phase 2; the temporary unique index keeps the round-trip a trivial upsert and is cleanly dropped in Phase 3.
 - **Consequences:** Phase 3 migration drops `files_one_per_user_uq` and adds `name` (+ created/updated already present). The remote file provider upserts on `user_id`; the remote settings provider stores/returns `value` verbatim. RLS is verified by the two-account test before the feature is exposed.
+
+## ADR-017 — All user settings follow the account (no device-level carve-out)
+
+- **Status:** Accepted. Supersedes the device-level/account split in [`01-architecture.md`](01-architecture.md) §6 and the Slice 2b `CLOUD_SETTINGS_KEYS` allowlist.
+- **Context:** §6 proposed migrating settings *selectively* — keeping "device-level" prefs (colour mode, dismissed-splash/hint flags, etc.) on `localStorage` even when logged in. It was explicitly a *"sensible default … revisit per key"* (also a backlog item), not a constraint. The only firm rule is [ADR-008](#adr-008--the-session-jwt-always-stays-local): the session **credential** stays local — but it is not a setting and already lives outside the settings seam ([ADR-011](#adr-011--the-session-store-stays-on-raw-localstorage-outside-the-settings-seam)).
+- **Decision:** For logged-in users, **all settings-seam keys follow the account** (route to the cloud cache). Drop the per-key allowlist. The settings seam reverts to a single `resolveBackend()` (cloud cache when active, else `localStorage`).
+- **Rationale:** Users expect their preferences to follow them across devices; the "device-level" rationale was soft caution, not a technical or security need. Removing the allowlist also removes a hidden source of drift (string literals mirrored from individual stores). The credential exclusion is preserved for free because it never passes through the seam.
+- **Alternatives rejected:**
+  - **Keep the §6 allowlist:** rejected — the user wants all prefs synced; the split added complexity for no clear benefit.
+  - **Carve out specific keys (e.g. dark mode, dismissed flags):** considered; the only material nuances are that dismissed flags won't re-show on a new device (usually desired) and colour mode's "system" option still tracks each device's OS. Neither warrants a carve-out.
+- **Consequences:** Every settings key persists per-user in `public.user_settings`. A fresh account starts with empty settings (local ones untouched; opt-in migration is Phase 3). Note: in code there is no separate "narrow-screen warning" key — that dialog reuses the `welcomed` flag — so §6's table slightly overstated the local set.
