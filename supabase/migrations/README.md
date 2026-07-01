@@ -9,6 +9,7 @@ Migrations are applied in **filename order**:
 | File | What it does |
 |---|---|
 | `0001_files_and_user_settings.sql` | Phase 2 schema: `public.files` + `public.user_settings`, the `updated_at` trigger, and owner-only RLS. |
+| `0002_multi_file.sql` | Phase 3: drop the one-row-per-user index on `files`, add `files.name` (multiple named files per user). |
 
 ## How to apply (manual, for now)
 
@@ -33,5 +34,10 @@ After applying `0001`:
   reset role;
   ```
   (The SQL Editor runs as a privileged role that bypasses RLS, so switching role is how you actually exercise the policy.)
+
+After applying `0002`:
+
+- **Table Editor** → `files` now has a **`name`** column.
+- **Database → Indexes** → `files_one_per_user_uq` is **gone**, so a user can hold multiple `files` rows (the existing owner-only RLS policies already cover them).
 
 The full cross-user isolation proof (two real accounts can't see each other's rows) happens once the app's remote provider can write data — see `docs/05-worklog.md`.

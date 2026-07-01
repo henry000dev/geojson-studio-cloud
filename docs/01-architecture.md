@@ -69,12 +69,15 @@ public.user_settings
   value         jsonb
   -- one row per (user_id, key); templates, bookmarks, prefs
 
--- Later, for payments:
-public.user_plan
-  user_id       uuid primary key references auth.users(id)
-  plan          text             -- "free" | "pro" | ...
-  status        text             -- stripe subscription status
-  ...
+-- Later, for payments (Phase 8 / ADR-022) — server-authoritative (webhook writes,
+-- client reads own row; never client-writable):
+public.user_plans
+  user_id                uuid primary key references auth.users(id)
+  plan                   text             -- "basic" | "pro" | ...  (free = local, no row)
+  status                 text             -- stripe subscription status
+  stripe_customer_id     text
+  stripe_subscription_id text
+  current_period_end     timestamptz
 ```
 
 > **Phase 2 implementation note (ADR-016).** The first migration (`supabase/migrations/0001_files_and_user_settings.sql`) refines this sketch: `user_settings.value` is **`text`** (the settings seam round-trips opaque `localStorage` strings, so text is a lossless mirror), `files` gains a **`backup_geojson`** column (the file seam writes both `geojson_data` and `backup_geojson_data`, and ADR-004 keeps no IndexedDB for logged-in users), `name` is **deferred to Phase 3**, and `files` carries a temporary **one-row-per-user** unique index for the Phase 2 single-active-file model.

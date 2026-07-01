@@ -76,27 +76,54 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 - **Validation:** dev account can create several files, switch, rename, delete; the **two-account RLS isolation** still holds with multiple rows (a list returns only the caller's files); anonymous user unaffected throughout.
 - **Risk:** medium — the largest new UI surface plus the provider/race work; a standard dialog + state otherwise.
 
-## Phase 4 — Free beta / early access
+> **Phases 4–8 revamped (2026-07-01)** when the epic's scope expanded from "cloud storage behind a flag" to a **freemium SaaS** (ADR-019). The old Phase 4 (beta) / Phase 5 (Stripe) are now Phase 6 / Phase 8, with production+server, account area, and the landing inserted. Payments stay **last** (ADR-007).
 
-- **Goal:** real-world validation at zero monetary risk.
+## Phase 4 — Production environment + Node server layer
+
+- **Goal:** stand up the production stack the paid product needs, now that the core is proven (the deferred [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first) unblock).
 - **Work:**
-  - Choose the cohort mechanism: open opt-in via URL param, an allowlist field on the user record (e.g. `beta: true`), or a server-side email allowlist (allowlist is the conventional next step once auth exists).
-  - Flag stays the public visibility toggle; the allowlist gates who actually gets the feature.
-  - **No payments yet.** Gather usage, fix issues, harden RLS.
+  - Create the **production Supabase project**; apply the migrations; wire `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` per environment (mirror the Mapbox token — the deferred ADR-014 pipeline work).
+  - Stand up the **server layer in the existing Node API** ([ADR-020](02-decisions.md#adr-020--the-server-side-layer-is-the-existing-node-api-not-edge-functions)): middleware that verifies the Supabase JWT + a `service_role` Supabase client. First use = **account deletion** (needs `service_role`).
+- **Validation:** a flag-on account round-trips against the prod project; an authenticated Node endpoint verifies the JWT and performs a privileged op.
+- **Risk:** medium — first production cloud footprint; secrets/isolation must be right.
+
+## Phase 5 — Account area + compliance
+
+- **Goal:** self-service account management (ADR-019) and the compliance basics for holding user data.
+- **Work:**
+  - **Account area** (user-facing, *not* an internal admin panel — the Supabase + Stripe dashboards are that): storage **usage** (a Postgres sum / view), **data export** (download my files + settings), **delete account** (Node + `service_role` → cascade), and later a **"Manage billing"** link to the Stripe Customer Portal.
+  - **Privacy policy + Terms**; terms acceptance at signup.
+- **Validation:** a user can see usage, export their data, and delete their account (cascade verified); policies published.
+- **Risk:** low–medium.
+
+## Phase 6 — Free beta / early access
+
+- **Goal:** real-world validation at zero monetary risk (the original Phase 4 goal).
+- **Work:**
+  - Cohort mechanism — an **allowlist** (a flag on `user_plans` / a beta table, or a server-side email allowlist) is the conventional step now that auth exists.
+  - The allowlist gates who gets in; **no payments yet.** Gather usage, fix issues, harden RLS.
 - **Validation:** beta users complete the full account journey without data or security problems.
 - **Risk:** low–medium (depends what beta surfaces).
 
-## Phase 5 — Stripe + entitlements
+## Phase 7 — Landing & go-public
 
-- **Goal:** introduce paid plans.
+- **Goal:** the public front door + the free-vs-paid framing ([ADR-021](02-decisions.md#adr-021--app-entry-topology-static-landing-at--app-at-app)).
 - **Work:**
-  - Stripe hosted Checkout + Customer Portal (no custom billing UI).
-  - Stripe webhook → updates `public.user_plan`.
-  - Define entitlements (file count, file-size, premium tools).
-  - Enforce them: simple checks in RLS/Postgres functions; complex business rules in the **selective Node layer** (where the wrapper finally earns its keep — see ADR-002).
-  - Grandfather or convert beta users.
-- **Validation:** full subscription lifecycle handled (subscribe, cancel, fail-to-pay, downgrade).
-- **Risk:** medium (money + lifecycle edge cases), but on a battle-tested storage/account stack.
+  - Hand-written **static landing** at `/` (features, pricing, free-tier entry, sign-up); app relocated to **`/app`** (Vite base + router base + nginx + Supabase redirect config).
+  - **Retire the `?ff=cloud` flag** — cloud becomes unconditional; delete the scaffolding.
+- **Validation:** bare domain serves the crawlable landing; free-tier entry → anonymous `/app`; sign-up → cloud; no dark-flag paths remain.
+- **Risk:** medium — entry-topology + auth-redirect changes; mostly config + a static page.
+
+## Phase 8 — Monetise: Stripe + entitlements
+
+- **Goal:** introduce paid plans (ADR-007 / [ADR-022](02-decisions.md#adr-022--monetisation-mechanics-user_plans-storage-quota-via-postgres-trigger-stripe)) — payments **last**, on a proven stack.
+- **Work:**
+  - `public.user_plans` (+ optional `plans`); the **storage-quota Postgres trigger**.
+  - Node routes: **Checkout**, **webhook** (raw-body signature → writes `user_plans`), **billing-portal**.
+  - Client: upgrade CTA, usage bar, plan state read from `user_plans`.
+  - Grandfather / convert beta users.
+- **Validation:** full subscription lifecycle (subscribe, cancel, fail-to-pay, downgrade-over-limit) reflected correctly in `user_plans` + quota.
+- **Risk:** medium (money + lifecycle edge cases), but on a battle-tested stack.
 
 ---
 

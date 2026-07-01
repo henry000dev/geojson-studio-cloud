@@ -23,7 +23,7 @@ Read in this order; the first three are the stable "truth", the last three chang
 | [`docs/00-overview.md`](docs/00-overview.md) | stable-ish | Start here. Problem, goals/non-goals, glossary, the two-paths summary. |
 | [`docs/01-architecture.md`](docs/01-architecture.md) | **stable** | The technical design: paths, Supabase, RLS, the storage seam, data model. |
 | [`docs/02-decisions.md`](docs/02-decisions.md) | **stable** (append-only) | ADR log — every major decision with its rationale and rejected alternatives. |
-| [`docs/03-rollout.md`](docs/03-rollout.md) | volatile | Branch strategy, the phased plan (0–5), feature-flag mechanics. |
+| [`docs/03-rollout.md`](docs/03-rollout.md) | volatile | Branch strategy, the phased plan (0–8), feature-flag mechanics. |
 | [`docs/04-backlog.md`](docs/04-backlog.md) | volatile | Deferred / TBD items kept visible. |
 | [`docs/05-worklog.md`](docs/05-worklog.md) | volatile | Dated "what's done / where I left off" log. Read this first on resuming. |
 

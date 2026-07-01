@@ -206,3 +206,56 @@ Format per record: **Status · Context · Decision · Rationale · Alternatives 
   - **Full page-reload on file open** (like sign-in/out): simpler isolation, but a reload flash and it needs a persisted active-file pointer; in-place switch is nicer and needs none. (Trade-off accepted: a *cold* refresh reopens the most-recent file, not the exact one being viewed — a last-opened pointer is backlogged.)
   - **Read-only on open:** considered; the user chose writable for simplicity/consistency.
 - **Consequences:** `0002_multi_file.sql` drops `files_one_per_user_uq` and adds `name`, shipping with the provider rewrite. New code: `stores/active-file.js` (active id + list + lifecycle, `ensureResolved()` mirroring `auth.ensureInitialised()`) and `MyFilesDialog.vue` (Phase 3b). The backup/undo-new-file path is gated to local mode. RLS is unchanged (owner-scoped, already multi-row safe) and re-verified in the two-account gate. Deferred (see [`04-backlog.md`](04-backlog.md)): import-as-new-named-file, File Info metadata, export filename, dropping `backup_geojson`, a last-opened pointer, My Files search/pagination, a migration dismissed-flag.
+
+## ADR-019 — The Cloud epic is a freemium SaaS: free = local, paid = cloud
+
+- **Status:** Accepted. Reframes the epic's commercial scope; builds on [ADR-004](#adr-004--two-isolated-storage-paths-no-sync) (two paths) and [ADR-007](#adr-007--payments-deferred-to-last) (payments last).
+- **Context:** The epic began as "optional accounts + cloud-saved work behind a flag." The goal is now explicit: **monetise** GeoJSON Studio as a small freemium SaaS. This crystallises the commercial model on top of the two-paths architecture already built.
+- **Decision:** The product is **freemium**, with a split that maps directly onto the existing isolated paths:
+  - **Free tier = the local/anonymous app** — the browser-only experience (IndexedDB + `localStorage`), usable forever with no account. It is a **permanent free tier, not a time-limited trial**.
+  - **Paid tier(s) = cloud** — accounts + cloud-saved files across devices, gated by a subscription. Cloud storage itself is the paid value; paid tiers differ by **storage quota** (**pricing is storage-based**, since the dominant cloud cost is Supabase storage).
+- **Rationale:** The two-paths design (ADR-004) already *is* the free tier, so "use the free version without signing up" needs no trial logic — it's the anonymous path. Storage-based pricing aligns price with the actual cost driver. Keeps the free experience first-class (an existing non-goal to remove it).
+- **Alternatives rejected:**
+  - **Time-limited trial of cloud:** rejected — the local app is a genuinely useful permanent free product; time-boxing it adds expiry machinery for no gain.
+  - **Feature-gated free *cloud* tier:** possible later; v1 keeps it simple — cloud = paid.
+- **Consequences:** Introduces paid plans ([ADR-022](#adr-022--monetisation-mechanics-user_plans-storage-quota-via-postgres-trigger-stripe)), a landing page that frames free-vs-paid ([ADR-021](#adr-021--app-entry-topology-static-landing-at--app-at-app)), and a self-service account area. The `?ff=cloud` flag becomes pre-launch scaffolding retired at go-public. Concrete tiers/prices are the user's to design (backlog).
+
+## ADR-020 — The server-side layer is the existing Node API (not Edge Functions)
+
+- **Status:** Accepted. Makes [ADR-002](#adr-002--client-direct-access-with-rls-not-a-node-wrapper)'s "thin Node layer, added later, selectively" concrete.
+- **Context:** Payments (Stripe webhook), account deletion, and privileged Supabase writes need server-side code that can't be client-direct (secrets, `service_role`, signature verification). Two candidate hosts: extend the existing `geojson-studio-api` (Node/Express, already deployed), or adopt Supabase **Edge Functions** (Deno, colocated with Supabase).
+- **Decision:** **Extend the existing Node API.** Cloud/payment endpoints are new routes there, organised by concern (payment / conversion / storage / dataset). No Edge Functions.
+- **Rationale:** The team already runs, deploys, and knows the Node API — least-effort, least new infrastructure. Neither Stripe (backend-agnostic) nor Supabase (`service_role` usable from any server) constrains this. Avoids introducing a second runtime (Deno) to a team still new to Supabase.
+- **Alternatives rejected:**
+  - **Supabase Edge Functions:** Supabase-native and fine for webhooks, but a new runtime + deploy path for no benefit the Node API doesn't already provide here. A hybrid (webhook-only edge function) was considered and rejected for the same reason.
+- **Consequences:** The Node API's prod env gains new secrets — Supabase **`service_role`** key, Stripe secret key, Stripe **webhook signing secret** (wired like [ADR-014](#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first)'s frontend build-args). Authenticated cloud endpoints **verify the caller's Supabase JWT** server-side; the Turnstile session JWT and the Supabase user JWT coexist (see the backlog's "unify the JWTs"). The Stripe webhook route must read the **raw body** for signature verification (skip global JSON parsing there). `service_role` stays server-only, never shipped.
+
+## ADR-021 — App entry topology: static landing at `/`, app at `/app`
+
+- **Status:** Accepted. Extends the flag decisions ([ADR-005](#adr-005--runtime-url-param-feature-flag-not-an-envbranch-flag)/[ADR-015](#adr-015--the-cloud-feature-flag-is-url-presence-based-not-persisted)) toward go-public.
+- **Context:** Today the bare domain *is* the editor SPA. A freemium SaaS needs a marketing front door (features, pricing, a "use the free version" entry, sign-up). The app is a Vue SPA served as **static files by nginx on Cloud Run** (Docker); `vue-router` is already present, and nginx already has SPA fallback.
+- **Decision:**
+  - **`/` = a landing page**, **`/app` = the editor** (Vite `base: '/app/'`, router base `/app/`).
+  - The landing is **hand-written static HTML** (a `landing/` source folder, no framework) — **not** a client-rendered SPA route — so it's crawlable for SEO. It's placed by the **Dockerfile** (COPY `landing/` → nginx root; app build → `/app/`), i.e. automatic in CI; nginx gains an `/app/` location beside the root.
+  - The landing's **free-tier entry** routes to the anonymous `/app` (no account); **sign-up/login** routes to the cloud experience.
+  - This is the **go-public** step that **retires the `?ff=cloud` flag** (ADR-005 always framed it as temporary scaffolding — launch = default-on / delete).
+- **Rationale:** A static landing is far more indexable than the SPA shell (better SEO even for the free tool) and fits the existing nginx-static / Cloud-Run model with **no new runtime** (build-time HTML, not SSR). Hand-written HTML is least-effort for one marketing page and stays featherweight. The free-tier button reusing the anonymous path is the ADR-004 / ADR-019 payoff.
+- **Alternatives rejected:**
+  - **SSR (render per request):** needs a live render server — overkill for a marketing page.
+  - **Landing as an SPA route, or an SSG framework (Astro/vite-ssg):** viable, but a client-rendered route is SEO-weak and a framework is unnecessary weight for one page; revisit if the marketing site grows.
+- **Consequences:** The app moves under `/app/` (Vite base + router base + nginx location + Supabase Auth **Site URL / redirect allow-list** updated per environment). Old `/` bookmarks now land on marketing. Mostly config + a static page.
+
+## ADR-022 — Monetisation mechanics: `user_plans`, storage quota via Postgres trigger, Stripe
+
+- **Status:** Accepted. Implements the paid side of [ADR-019](#adr-019--the-cloud-epic-is-a-freemium-saas-free--local-paid--cloud); realises [ADR-007](#adr-007--payments-deferred-to-last) (Stripe) via the Node layer ([ADR-020](#adr-020--the-server-side-layer-is-the-existing-node-api-not-edge-functions)).
+- **Context:** Paid cloud needs plan state, quota enforcement, and billing. Pricing is **storage-based**; GeoJSON is stored inline in Postgres (ADR-001/016), so "storage used" is the summed byte-size of a user's files.
+- **Decision:**
+  - **`public.user_plans`** (plural, matching `files` / `user_settings`), one row per user: `user_id` PK → `auth.users`, `plan`, `status` (Stripe sub status), `stripe_customer_id`, `stripe_subscription_id`, `current_period_end`. **Server-authoritative:** RLS lets a user **read** their own row; there is **no client write policy** — only the Node API (`service_role`) writes it. Optional `public.plans` lookup (`plan → limit_bytes`, price).
+  - **Quota enforced by a Postgres trigger** on `files` (`before insert/update`): sum the user's GeoJSON bytes incl. the pending write, compare to the plan's limit, `raise exception` if over. Since writes are client-direct (RLS), the trigger is the real gate; the client shows a usage bar (UX only). **Downgrade-over-limit is humane** — block growth, allow deletes/shrinking; never delete data.
+  - **Stripe:** hosted **Checkout** + **Customer Portal** (the portal covers billing history / invoices / cancellation — no custom billing UI); a **webhook** (Node, raw-body signature verify) is the *only* inbound channel and keeps `user_plans` in sync. **Grant entitlements on the webhook, never on the browser's return** from Checkout.
+- **Rationale:** Inline-Postgres storage makes usage a trivial `sum(octet_length(...))` and enforcement plain Postgres (robust; Node isn't needed to *enforce*, only to *set* the plan via the webhook). Server-authoritative plan state is essential — a client must never grant itself a plan. Stripe's hosted surfaces minimise custom billing code.
+- **Alternatives rejected:**
+  - **Client- or RLS-`with check`-only quota:** rejected — aggregate-across-rows checks belong in a trigger; client checks are UX, not a gate.
+  - **Plan columns on `auth.users`:** rejected — Supabase-managed schema; business state lives in your own `public` tables.
+  - **Custom billing UI:** rejected — the Stripe Customer Portal covers it.
+- **Consequences:** New migration(s) for `user_plans` (+ maybe `plans`) and the quota trigger, shipped with Phase 8. The Node API gains checkout / webhook / billing-portal routes (ADR-020). "Storage" today = Postgres DB size (not the separate Supabase Storage product); if files grow large, the backlog's move-to-Storage item is the cost lever — quota enforcement is unchanged. Concrete tiers/prices/limits are the user's to design (backlog).
