@@ -55,7 +55,7 @@ The unit of saved work is a **file** — one DB row per file. Bookmarks, templat
 auth.users                       — managed by Supabase Auth
   id (uuid), email, ...
 
-public.files
+public.user_files
   id            uuid primary key
   user_id       uuid references auth.users(id)   -- RLS scope
   name          text
@@ -80,16 +80,16 @@ public.user_plans
   current_period_end     timestamptz
 ```
 
-> **Phase 2 implementation note (ADR-016).** The first migration (`supabase/migrations/0001_files_and_user_settings.sql`) refines this sketch: `user_settings.value` is **`text`** (the settings seam round-trips opaque `localStorage` strings, so text is a lossless mirror), `files` gains a **`backup_geojson`** column (the file seam writes both `geojson_data` and `backup_geojson_data`, and ADR-004 keeps no IndexedDB for logged-in users), `name` is **deferred to Phase 3**, and `files` carries a temporary **one-row-per-user** unique index for the Phase 2 single-active-file model.
+> **Phase 2 implementation note (ADR-016, amended by ADR-023).** The active-document table is **`public.user_files`** (renamed from `files` for consistency — ADR-023). The first migration (`supabase/migrations/0001_files_and_user_settings.sql`) refines this sketch: `user_settings.value` is **`text`** (the settings seam round-trips opaque `localStorage` strings, so text is a lossless mirror), `name` is **deferred to Phase 3**, and `user_files` carries a temporary **one-row-per-user** unique index for the Phase 2 single-active-file model (dropped in `0002`). There is **no `backup_geojson` column** — cloud File→New is non-destructive, so the backup/undo machinery is local-only (ADR-018/023).
 
 RLS policy shape (every table, every operation):
 
 ```sql
 -- example shape; final SQL lives with the migrations
-create policy "owner reads"   on public.files for select using (auth.uid() = user_id);
-create policy "owner inserts" on public.files for insert with check (auth.uid() = user_id);
-create policy "owner updates" on public.files for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
-create policy "owner deletes" on public.files for delete using (auth.uid() = user_id);
+create policy "owner reads"   on public.user_files for select using (auth.uid() = user_id);
+create policy "owner inserts" on public.user_files for insert with check (auth.uid() = user_id);
+create policy "owner updates" on public.user_files for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "owner deletes" on public.user_files for delete using (auth.uid() = user_id);
 ```
 
 ## 6. What moves to the cloud vs stays local

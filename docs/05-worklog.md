@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-07-02 — Design Q&A: staged entry topology, connection-loss resilience, delta framing (ADRs 024–025)
+
+Planning session — **no code.** Pressure-tested four concerns for Phases 7–8 and captured the outcomes.
+
+**Decisions (new ADRs):**
+- **ADR-024 — Entry topology in two stages.** A query-string flag only affects client-side behaviour after load, so the landing can't be *both* flag-gated *and* statically SEO-served. **Stage 1:** dark preview — one SPA at root, a flag-gated `/` renders a **temporary client-rendered `Landing` component**, `/app` = editor, no infra change, no SEO (fine while dark). **Stage 2 (launch):** the ADR-021 restructure — **static SEO landing** at `/`, app → `/app`, flag deleted, temporary component removed. Resolves the earlier bare-domain contradiction: Stage 1 bare = editor, Stage 2 bare = landing.
+- **ADR-025 — Connection-loss resilience (Level 1).** `supabase-js` has **no offline queue** (unlike Firestore); logged-in users keep no local copy (ADR-004). v1 = **retry-with-backoff + reconnect flush + a save-status indicator + a `beforeunload` guard** (autosave-service + a small Pinia store; no new storage). A crash-recovery journal (Level 2, a scoped ADR-004 exception) and full offline-first (Level 3) are rejected/backlogged.
+
+**Other Q&A (no ADR):**
+- **Deltas / large files (#4)** — right smell, wrong time/mechanism. v1 keeps **whole-document writes** (matches inline-`jsonb`; deltas save upload bytes but not DB write cost until you move to **per-feature rows**). If ever needed, prefer **client-direct RPC / per-row** over Node endpoints (ADR-002). The user will **test large files** and likely impose a **per-file size limit** (Studio is an editor, not built for huge files) — which may make deltas moot.
+- **RLS vs RPC vs Node endpoints** — clarified: both RLS (DB-enforced per-user `WHERE`) and RPC (a Postgres function called via `supabase.rpc`) are client-direct; Node endpoints are for **secrets, trusted callbacks, and privileged ops only** (ADR-002/020), not CRUD.
+
+**Docs touched:** new ADR-024/025; ADR-021 status annotated (this is its Stage 2 form); rollout Phase 7 rewritten as two stages + connection-loss added to cross-cutting concerns; backlog — Storage expanded (per-file size limit, whole-doc-vs-delta), new **Resilience** section (Level 2 journal).
+
+### Where to resume — Phase 4 (production + Node server layer)
+- Unchanged: Phase 3 is complete; Phase 4 is next. ADRs 024–025 are forward-looking design capture (Phases 7 / cross-cutting) — nothing to build now.
+
+---
+
+## 2026-07-01 — Schema cleanup: `files` → `user_files`, drop `backup_geojson` (ADR-023)
+
+Two schema refinements, done by **amending the creation scripts** — we're pre-production and the user dropped the non-prod tables, so no ALTER/cleanup migration (ADR-023). App build clean.
+
+- **`0001` / `0002`** — the active-document table is now **`public.user_files`** (consistency with `user_settings` / `user_plans`), with its index (`user_files_one_per_user_uq`), policies (`user_files_*`), and trigger (`user_files_set_updated_at`) renamed to match. The **`backup_geojson` column is gone** (cloud File→New is non-destructive — ADR-018). The user re-applies `0001`+`0002` fresh.
+- **`remote-file-storage.js`** — targets `user_files`; `KEY_TO_COLUMN` now maps only `geojson_data → geojson` (the local-only `backup_geojson_data` key never reaches the cloud). Build clean; chunking unchanged.
+- **Docs** — new **ADR-023**; ADR-016 annotated as superseded-in-part; ADR-022 + architecture §5 (sketch, note, RLS example) + rollout + backlog references updated to `user_files`; the "drop backup_geojson" backlog item removed (done); migrations README records the pre-prod in-place-amendment policy.
+
+### Where to resume — Phase 4 (production + Node server layer)
+- Unchanged: Phase 3 is complete; Phase 4 is next. Note for prod: because these were creation-script amendments (not ALTER migrations), the **production** project just applies the current `0001`+`0002` once — there's no rename/drop to replay.
+
+---
+
 ## 2026-07-01 — SaaS scope expansion: roadmap revamped (Phases 4–8), ADRs 019–022
 
 Planning session — **no code.** The user set the goal explicitly: **monetise Studio as a freemium SaaS.** Discussed the shape and captured it across the docs.

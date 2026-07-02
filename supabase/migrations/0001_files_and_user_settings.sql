@@ -7,26 +7,26 @@
 -- Security model: every row is owned by `user_id`. RLS restricts all access to the
 -- owner, and only the `authenticated` role may touch these tables — anonymous
 -- visitors (`anon`) get nothing. See docs/02-decisions.md ADR-002 (RLS is the
--- boundary) and ADR-016 (these schema choices).
+-- boundary), ADR-016 (schema choices), and ADR-023 (the `user_files` name + no
+-- backup column — amended into this creation script pre-production).
 
 -- ============================================================================
--- 1. files — the user's active GeoJSON document
+-- 1. user_files — the user's active GeoJSON document
 --    Phase 2: one row per user (the cloud equivalent of the local `geojson_data`
 --    record). Phase 3 relaxes this to multiple named files per user.
 -- ============================================================================
-create table if not exists public.files (
+create table if not exists public.user_files (
   id              uuid        primary key default gen_random_uuid(),
   user_id         uuid        not null default auth.uid()
                               references auth.users (id) on delete cascade,
-  geojson         jsonb,                 -- active document    (file-seam key "geojson_data")
-  backup_geojson  jsonb,                 -- safety copy         (file-seam key "backup_geojson_data")
+  geojson         jsonb,                 -- active document (file-seam key "geojson_data")
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now()
 );
 
 -- Phase 2 invariant: exactly one file per user (no multi-file UI yet). This makes
 -- the provider write a trivial upsert on `user_id`. Phase 3 DROPS this index.
-create unique index if not exists files_one_per_user_uq on public.files (user_id);
+create unique index if not exists user_files_one_per_user_uq on public.user_files (user_id);
 
 -- ============================================================================
 -- 2. user_settings — per-user KV mirror of the settings seam.
@@ -53,9 +53,9 @@ begin
 end;
 $$;
 
-drop trigger if exists files_set_updated_at on public.files;
-create trigger files_set_updated_at
-  before update on public.files
+drop trigger if exists user_files_set_updated_at on public.user_files;
+create trigger user_files_set_updated_at
+  before update on public.user_files
   for each row execute function public.set_updated_at();
 
 drop trigger if exists user_settings_set_updated_at on public.user_settings;
@@ -68,29 +68,29 @@ create trigger user_settings_set_updated_at
 --    Enable RLS (deny-by-default), grant table privileges to `authenticated`
 --    only, revoke from `anon`, then add owner-only per-command policies.
 -- ============================================================================
-alter table public.files         enable row level security;
+alter table public.user_files    enable row level security;
 alter table public.user_settings enable row level security;
 
-revoke all on public.files         from anon;
+revoke all on public.user_files    from anon;
 revoke all on public.user_settings from anon;
-grant select, insert, update, delete on public.files         to authenticated;
+grant select, insert, update, delete on public.user_files    to authenticated;
 grant select, insert, update, delete on public.user_settings to authenticated;
 
--- files policies (owner-only)
-drop policy if exists "files_select_own" on public.files;
-create policy "files_select_own" on public.files
+-- user_files policies (owner-only)
+drop policy if exists "user_files_select_own" on public.user_files;
+create policy "user_files_select_own" on public.user_files
   for select to authenticated using (auth.uid() = user_id);
 
-drop policy if exists "files_insert_own" on public.files;
-create policy "files_insert_own" on public.files
+drop policy if exists "user_files_insert_own" on public.user_files;
+create policy "user_files_insert_own" on public.user_files
   for insert to authenticated with check (auth.uid() = user_id);
 
-drop policy if exists "files_update_own" on public.files;
-create policy "files_update_own" on public.files
+drop policy if exists "user_files_update_own" on public.user_files;
+create policy "user_files_update_own" on public.user_files
   for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
-drop policy if exists "files_delete_own" on public.files;
-create policy "files_delete_own" on public.files
+drop policy if exists "user_files_delete_own" on public.user_files;
+create policy "user_files_delete_own" on public.user_files
   for delete to authenticated using (auth.uid() = user_id);
 
 -- user_settings policies (owner-only)

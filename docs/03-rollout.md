@@ -44,7 +44,7 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 - **Goal:** logged-in users round-trip a GeoJSON document and settings through Supabase.
 - **Work:**
-  - `RemoteStorageManager` implementing the seam interface against `public.files`.
+  - `RemoteStorageManager` implementing the seam interface against `public.user_files`.
   - Equivalent remote implementation for the settings KV seam against `public.user_settings`.
   - Update the Phase 0 providers to switch implementation by **auth state**: logged-in → remote, anonymous → local.
   - Add RLS policies on every relevant table; **manually verify** they reject cross-user access before exposing the feature.
@@ -107,12 +107,13 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 ## Phase 7 — Landing & go-public
 
-- **Goal:** the public front door + the free-vs-paid framing ([ADR-021](02-decisions.md#adr-021--app-entry-topology-static-landing-at--app-at-app)).
-- **Work:**
-  - Hand-written **static landing** at `/` (features, pricing, free-tier entry, sign-up); app relocated to **`/app`** (Vite base + router base + nginx + Supabase redirect config).
+- **Goal:** the public front door + the free-vs-paid framing ([ADR-021](02-decisions.md#adr-021--app-entry-topology-static-landing-at--app-at-app)), delivered in **two stages** ([ADR-024](02-decisions.md#adr-024--entry-topology-in-two-stages-client-rendered-preview-then-static-seo-landing)).
+- **Stage 1 — dark preview (behind the flag, can land earlier):** one SPA at root; a flag-gated `/` route renders a **temporary client-rendered `Landing` component**, `/app` renders the editor; `?ff=cloud` propagates through navigation. **No infra change** (nginx SPA fallback already resolves `/app`); no SEO yet (nothing crawls the dark flag). Lets the whole topology be previewed like any other slice.
+- **Stage 2 — launch:**
+  - Hand-written **static SEO landing** at `/` (features, pricing, free-tier entry, sign-up); app relocated to **`/app`** (Vite base + router base + nginx + Supabase redirect config); **delete the temporary `Landing` component**.
   - **Retire the `?ff=cloud` flag** — cloud becomes unconditional; delete the scaffolding.
-- **Validation:** bare domain serves the crawlable landing; free-tier entry → anonymous `/app`; sign-up → cloud; no dark-flag paths remain.
-- **Risk:** medium — entry-topology + auth-redirect changes; mostly config + a static page.
+- **Validation:** Stage 1 — flag-on shows the preview landing at `/`, `/app` runs the editor, bare `/` is unchanged. Stage 2 — bare domain serves the **crawlable static** landing; free-tier entry → anonymous `/app`; sign-up → cloud; no dark-flag paths remain.
+- **Risk:** medium — entry-topology + auth-redirect changes; mostly config + a static page. Stage 1 is near-zero risk (client routing only).
 
 ## Phase 8 — Monetise: Stripe + entitlements
 
@@ -141,7 +142,8 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 - **Authorization** — RLS on every user-data table, scoped to `auth.uid()`. The single security-critical surface.
 - **Privacy / ToS** — storing user content brings obligations: privacy policy + terms before opening to real users; GDPR-style data export and account deletion.
-- **Account deletion** — define the flow (hard-delete from `files` + `user_settings`; Supabase deletes the auth user).
+- **Account deletion** — define the flow (hard-delete from `user_files` + `user_settings`; Supabase deletes the auth user).
+- **Connection-loss resilience** — `supabase-js` has no offline queue; logged-in users keep no local copy (ADR-004). v1 ships **Level 1** ([ADR-025](02-decisions.md#adr-025--connection-loss-resilience-for-cloud-edits-level-1-retry--reconnect-flush--save-status)): autosave **retry-with-backoff + reconnect flush**, a **save-status indicator**, and a **`beforeunload` guard**. A crash-recovery journal (Level 2) is backlogged.
 - **Backups** — Supabase managed Postgres provides automated backups; confirm the tier when ready.
 - **Monitoring** — basic uptime + error reporting; Supabase dashboard for DB metrics.
 - **Kill-switch** — the always-present local path means flipping the flag off (or routing logged-in users to local fallback) is an instant rollback without a deploy.
