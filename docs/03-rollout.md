@@ -78,14 +78,14 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 > **Phases 4–8 revamped (2026-07-01)** when the epic's scope expanded from "cloud storage behind a flag" to a **freemium SaaS** (ADR-019). The old Phase 4 (beta) / Phase 5 (Stripe) are now Phase 6 / Phase 8, with production+server, account area, and the landing inserted. Payments stay **last** (ADR-007).
 
-## Phase 4 — Production environment + Node server layer
+## Phase 4 — Node server layer (on non-prod)
 
-- **Goal:** stand up the production stack the paid product needs, now that the core is proven (the deferred [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first) unblock).
+- **Goal:** add the server-side layer the paid product needs — built and tested entirely against the **existing non-prod** Supabase project. **No production project yet** (that's deferred to the Phase 6 beta gate — ADR-014).
+- **Why no prod here:** nothing in Phases 4–5, and even Stripe development in Phase 8, requires the production project. The Node layer only needs *a* Supabase project with a `service_role` key — non-prod already has one. Provisioning prod now would just create a production footprint to maintain long before any real user touches it. See [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first).
 - **Work:**
-  - Create the **production Supabase project**; apply the migrations; wire `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` per environment (mirror the Mapbox token — the deferred ADR-014 pipeline work).
-  - Stand up the **server layer in the existing Node API** ([ADR-020](02-decisions.md#adr-020--the-server-side-layer-is-the-existing-node-api-not-edge-functions)): middleware that verifies the Supabase JWT + a `service_role` Supabase client. First use = **account deletion** (needs `service_role`).
-- **Validation:** a flag-on account round-trips against the prod project; an authenticated Node endpoint verifies the JWT and performs a privileged op.
-- **Risk:** medium — first production cloud footprint; secrets/isolation must be right.
+  - Stand up the **server layer in the existing Node API** ([ADR-020](02-decisions.md#adr-020--the-server-side-layer-is-the-existing-node-api-not-edge-functions)): middleware that verifies the Supabase JWT + a `service_role` Supabase client, pointed at **non-prod**. First use = **account deletion** (needs `service_role`).
+- **Validation:** an authenticated Node endpoint verifies a non-prod Supabase JWT and performs a privileged op (account deletion cascades correctly).
+- **Risk:** low–medium — server secrets (`service_role`) must be handled right, but there's no production footprint to get wrong yet.
 
 ## Phase 5 — Account area + compliance
 
@@ -98,12 +98,13 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 ## Phase 6 — Free beta / early access
 
-- **Goal:** real-world validation at zero monetary risk (the original Phase 4 goal).
+- **Goal:** real-world validation at zero monetary risk (the original Phase 4 goal). **This is the production gate** — the first point real external users arrive, and the user's explicit "non-prod is good enough" sign-off.
 - **Work:**
+  - **Provision the production stack** (moved here from Phase 4 — the deferred [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first) unblock): create the **production Supabase project**; apply the migrations; wire `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` per environment (mirror the Mapbox token). First production cloud footprint — secrets/isolation must be right. *(Done only once the user is happy with non-prod.)*
   - Cohort mechanism — an **allowlist** (a flag on `user_plans` / a beta table, or a server-side email allowlist) is the conventional step now that auth exists.
   - The allowlist gates who gets in; **no payments yet.** Gather usage, fix issues, harden RLS.
-- **Validation:** beta users complete the full account journey without data or security problems.
-- **Risk:** low–medium (depends what beta surfaces).
+- **Validation:** a flag-on account round-trips against the **prod** project; beta users complete the full account journey without data or security problems.
+- **Risk:** medium — first production footprint (secrets/isolation) on top of whatever beta surfaces.
 
 ## Phase 7 — Landing & go-public
 
@@ -123,7 +124,8 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
   - Node routes: **Checkout**, **webhook** (raw-body signature → writes `user_plans`), **billing-portal**.
   - Client: upgrade CTA, usage bar, plan state read from `user_plans`.
   - Grandfather / convert beta users.
-- **Validation:** full subscription lifecycle (subscribe, cancel, fail-to-pay, downgrade-over-limit) reflected correctly in `user_plans` + quota.
+- **Development is in Stripe *test mode* against non-prod:** the whole Checkout + webhook + portal flow is built and exercised with Stripe test keys and the Stripe CLI forwarding webhooks to the local Node (writing to non-prod `user_plans`) — no production project or live keys needed until the launch cutover.
+- **Validation:** full subscription lifecycle (subscribe, cancel, fail-to-pay, downgrade-over-limit) reflected correctly in `user_plans` + quota (test mode); live keys wired only at launch.
 - **Risk:** medium (money + lifecycle edge cases), but on a battle-tested stack.
 
 ---

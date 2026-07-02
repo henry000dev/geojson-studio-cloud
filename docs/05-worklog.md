@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-07-02 — Defer production Supabase to the beta gate; Phase 4 is now non-prod-only
+
+Planning tweak — **no code.** The user questioned why Phase 4 provisions the **production** Supabase project when we're nowhere near production-ready. Confirmed it doesn't need to, and it's more consistent with **ADR-014** ("non-prod only for now; defer prod until core is proven") to move it.
+
+**Decision:** split the old Phase 4. Nothing between here and beta requires the prod project — the Node server layer + account deletion need only *a* `service_role` key (non-prod has one), the account area is non-prod, and even **Stripe develops in test mode** against non-prod. So:
+- **Phase 4 → "Node server layer (on non-prod)"** — JWT-verify middleware + `service_role` client + account deletion, all against the existing non-prod project. Prod bullet removed.
+- **Production provisioning moved to the front of Phase 6 (beta)** — the first point real users arrive and the user's explicit "non-prod is good enough" sign-off. Pins ADR-014's vague "until proven" to a concrete gate.
+- **Phase 8** annotated: Stripe Checkout/webhook/portal built in **test mode** (Stripe CLI → local Node → non-prod `user_plans`); live keys + prod are the launch cutover only.
+
+**Docs touched:** ADR-014 Consequences (added "when proven happens" → Phase 6 gate); rollout Phase 4 rewritten (non-prod, risk down to low–medium), Phase 6 gains the prod-provisioning task + gate framing, Phase 8 gains the test-mode note.
+
+### Where to resume — Phase 4 (Node server layer, on non-prod)
+- Add the server layer to `geojson-studio-api`: Supabase-JWT-verify middleware + a `service_role` client pointed at **non-prod**; first endpoint = **account deletion** (cascade via the `on delete cascade` FKs). Still open on the user's side: verify Phase 3 Slice 3c, and large-file testing → per-file size limit.
+
+---
+
 ## 2026-07-02 — Design Q&A: staged entry topology, connection-loss resilience, delta framing (ADRs 024–025)
 
 Planning session — **no code.** Pressure-tested four concerns for Phases 7–8 and captured the outcomes.

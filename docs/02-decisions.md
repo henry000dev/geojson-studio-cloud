@@ -145,6 +145,7 @@ Format per record: **Status · Context · Decision · Rationale · Alternatives 
 - **Alternatives rejected:**
   - **One shared Supabase project across environments:** rejected — staging activity pollutes production data/users, and a single project must allow-list every origin.
 - **Consequences:** Schema + RLS must be kept in sync across projects via **migrations held in this repo** (ADR-009). Production project creation and pipeline/env wiring are **deferred, tracked tasks** (see [`05-worklog.md`](05-worklog.md)). The current project serves local/non-prod. Each environment threads its URL+key the same way the Mapbox token already is: `--build-arg` → Dockerfile `ARG`/`ENV` → Vite (URL as a GitHub *Variable*, publishable key as a *Secret*, mirroring `VITE_API_HOST` / `VITE_MAPBOX_ACCESS_TOKEN`).
+- **When "proven" happens (added 2026-07-02).** "Until core cloud functionality is proven" is pinned to the **beta gate (Phase 6)** — the first point real external users arrive, and the user's explicit "I'm happy with non-prod" sign-off. Provisioning was originally bundled into Phase 4; it is now the **first task of Phase 6**. Nothing between here and then requires the prod project: the Node server layer + account deletion (`service_role`), the account area, and even **Stripe (test mode)** all build against the non-prod project. Prod + Stripe *live* keys are the launch cutover only.
 
 ## ADR-015 — The cloud feature flag is URL-presence-based, not persisted
 
