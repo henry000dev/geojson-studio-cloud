@@ -4,6 +4,85 @@
 
 ---
 
+## 2026-07-02 — Phase 5 design agreed (ADR-027); ready to implement Slice 5a
+
+Design session for **Phase 5 — account area + compliance** — **no code yet.** Grounded in the real repos first (app `vue-router` with base = `import.meta.env.BASE_URL`; the `public/about.html` static-page pattern served by nginx's `try_files … /index.html` fallback; api Phase 4 `createSupabaseAuth` + `POST /api/v1/account/delete`). Recorded as **ADR-027**; rollout Phase 5 fleshed into three slices.
+
+**Decisions:**
+- **Usage + export are client-direct (RLS); no new Node endpoints** — pure owner reads need no secret (ADR-002). Usage = a `public.user_storage_usage` view (`security_invoker`, `sum(octet_length(geojson::text))` + `count(*)`); export = the client packages its own `user_files` + `user_settings` into one JSON bundle. Deletion reuses the Phase 4 endpoint. **Supersedes-in-part** ADR-026's assumption that Phase 5 adds Node endpoints.
+- **My Account is a dedicated `/account` route** (lazy / code-split `AccountView.vue`, flag+auth-guarded, `?ff=cloud`-preserving nav, `AccountMenu` entry), not a dialog — SaaS convention; rides `BASE_URL` → becomes `/app/account` after Phase 7.
+- **Compliance = static HTML** (`public/privacy.html` + `public/terms.html`) mirroring `about.html`; no infra change. Content drafted by me, edited by the user later.
+- **Terms acceptance in a generic `public.user_profiles` table** (user's call — not the narrow `terms_acceptances`, and not `user_settings`, which is preferences-only): one row per user, `terms_accepted_at` + `terms_version` first, room for future per-user fields. A **required** signup checkbox gates both password + Google; the row is written on **first login** (idempotent), since confirm-email / OAuth leave no authenticated session at the signup instant.
+
+**Migrations (user applies to non-prod):** `0003_storage_usage_view.sql`, `0004_user_profiles.sql`.
+
+**Docs touched:** new **ADR-027** (+ ADR-026 annotated with the supersede-in-part pointer); rollout Phase 5 rewritten as slices 5a–5c; backlog compliance/ops updated (deletion done; export + terms in Phase 5) with new deferrals (reconcile `about.html` privacy at launch, terms re-acceptance on version bump, export-as-zip, `user_profiles` future fields); `00-overview.md` status refreshed to Phases 0–4 done / Phase 5 starting.
+
+### Where to resume — Phase 5 · Slice 5a
+- Author `public/privacy.html` + `public/terms.html` in `geojson-studio-app`, mirroring `about.html` (draft content — the user finalises the legal text). Then 5b (`0003` usage view + the `/account` route/view with usage / export / delete) and 5c (`0004` `user_profiles` + signup checkbox + first-login recording). The user applies migrations to non-prod and handles git + e2e.
+
+---
+
+## 2026-07-02 — Phase 4 verified complete
+
+User ran the full round-trip against **non-prod**: filled the API `.env.local` (URL + `sb_publishable_…` + `sb_secret_…` as `SUPABASE_SERVICE_ROLE_KEY`), enabled the API, and `POST /api/v1/account/delete` with a real access token returned **204** — the `auth.users` row and the user's `user_files`/`user_settings` cascaded away. **Phase 4 is done.** Next: **Phase 5 — account area + compliance** (reuses `createSupabaseAuth`). Production provisioning remains the Phase 6 beta gate.
+
+---
+
+## 2026-07-02 — Phase 4 implemented (Node server layer + account deletion) — code-complete
+
+Built Phase 4 in `geojson-studio-api` per ADR-026. **Jest: 7 suites / 161 tests pass** (147 pre-existing untouched + 14 new). Ships **dark** (`ACCOUNT_API_ENABLED=false` by default); **pending the user's manual round-trip against non-prod.**
+
+**New files:**
+- **`services/supabaseClients.js`** — `createSupabaseClients(config, deps)` returns a two-function wrapper: `verifyUser(token)` (→ `auth.getUser`, null on failure) and `deleteUser(id)` (→ `service_role` `auth.admin.deleteUser`, **tolerant of an already-deleted user** — 404/"not found" swallowed so concurrent/repeat calls stay clean). `deps.createClient` is injectable for tests.
+- **`middlewares/supabaseAuth.js`** — `createSupabaseAuth(clients)` mirrors `createSessionAuth`: `Bearer` token → `verifyUser` → attaches `req.supabaseUser = {id,email}`, else 401. **No debug-secret bypass** (identity endpoint), **no open "disabled" mode** (only mounted when enabled).
+- **`routes/accountRoute.js` + `controllers/accountController.js` + `services/accountService.js`** — `POST /api/v1/account/delete`; deletes `req.supabaseUser.id` **only** (never a body id), 204 on success. No body parser.
+- **`tests/account.test.js`** (7) + **`tests/supabaseClients.test.js`** (7).
+
+**Wiring:**
+- **`app.js`** — new block *only when `config.accountApiEnabled`*: mounts `/api/v1/account` with its own tight rate limiter (`maxRequests: 10`, like `/session`) + `createSupabaseAuth`, then the route. Inherits the existing Cloudflare guard + logger on `/api`. **Turnstile path untouched** (session auth still scoped to convert/dataset; only registration lines added).
+- **`index.js`** — config gains `accountApiEnabled`, `supabaseUrl`, `supabasePublishableKey`, `supabaseServiceRoleKey`.
+- **`.env.template` / `.env.local`** — the four new vars (local defaults to `ACCOUNT_API_ENABLED=false`, empty Supabase values). **`SUPABASE_SERVICE_ROLE_KEY` is secret/server-only** — not committed with a value.
+- **`tests/helpers/createTestApp.js`** — now takes an `overrides` object (used to enable the account API + inject stub clients).
+- Added dep **`@supabase/supabase-js`**.
+
+**Not yet verified — the Phase 4 gate (needs the user):**
+1. Fill `.env.local` from the **non-prod** Supabase project (URL + publishable + `service_role`), set `ACCOUNT_API_ENABLED=true`, `npm run local`.
+2. With a real non-prod dev-login access token: `POST /api/v1/account/delete` with `Authorization: Bearer <token>` → **204**; confirm the `auth.users` row is gone and `user_files`/`user_settings` cascaded away in the Supabase Table Editor.
+3. No/invalid token → **401**; body-supplied id is ignored (only the token's user is deleted).
+4. Confirm `admin.deleteUser`'s already-gone error shape matches `isUserNotFound` (adjust if Supabase returns a different status/message).
+
+### Where to resume — Phase 5 (account area + compliance)
+- Reuse `createSupabaseAuth` for the account-area endpoints (storage usage, data export). Deletion is already done. Prod provisioning is still the Phase 6 beta gate. User handles git + runs any manual/e2e checks.
+
+---
+
+## 2026-07-02 — Phase 4 design agreed (ADR-026); ready to implement
+
+Design session for **Phase 4 — Node server layer (on non-prod)** — **no code yet.** Read the actual `geojson-studio-api` repo first (layered `routes→controllers→services`, `createApp(config)` DI, middleware factories with `enabled` flags, all endpoints `POST`/RPC-style, secrets read in `index.js` + documented in `.env.template`). Recorded as **ADR-026**; Phase 4 in [`03-rollout.md`](03-rollout.md) fleshed out.
+
+**Decisions:**
+- **Verify the Supabase JWT via `supabase.auth.getUser`** (delegate to Supabase) rather than local signature check — simplest correct option, catches revoked/deleted users, no crypto surface to own. Local JWKS/HS256 verify revisited only if a high-frequency authed endpoint ever needs it.
+- **New `createSupabaseAuth` middleware** (mirrors `createSessionAuth`) → attaches `req.supabaseUser`; **two injected clients** (verify + `service_role` admin) so Jest can stub them.
+- **Endpoint is `POST /api/v1/account/delete`, not `DELETE`** — the whole API is already all-`POST`/RPC-style (verified: zero DELETE/PUT anywhere), so an action-verb path is *more* consistent and reads as an action namespace (`/account/delete`, later `/account/export`). User raised this; agreed on the merits.
+- **Self-only deletion**: targets `req.supabaseUser.id` from the verified token, never a body id (IDOR guard); no debug-secret bypass on an identity endpoint; handler tolerant of repeat calls. `admin.deleteUser` cascades to `user_files`/`user_settings`.
+- **Scope**: deletion only this phase; usage/export deferred to Phase 5 (reusing the same middleware). New dep `@supabase/supabase-js`; new non-prod env `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SERVICE_ROLE_KEY` (secret) / `ACCOUNT_API_ENABLED` (ships dark).
+
+**Q&A resolved:** (1) **No impact to the Turnstile code** — session auth stays scoped to convert/dataset; account routes get their own gate; `app.js` only gains registration lines; account endpoint inherits the Cloudflare guard + logger. Only shared touchpoint is the existing in-memory rate-limiter block Map (a block on one path applies to the others — pre-existing behaviour). (2) HTTP-method discussion → `POST /account/delete` (above).
+
+**Docs touched:** new **ADR-026**; ADR-020 annotated (its first concrete build); rollout Phase 4 fleshed out with the file-by-file plan + validation.
+
+### Where to resume — implement Phase 4 (on non-prod)
+- In `geojson-studio-api`: add `@supabase/supabase-js`; `services/supabaseClients.js` (verify + admin, injected via `createApp` config); `middlewares/supabaseAuth.js` (`createSupabaseAuth` → `getUser` → `req.supabaseUser`); `routes/accountRoute.js` + `controllers/accountController.js` + `services/accountService.js` for `POST /api/v1/account/delete` (self-only, cascade, repeat-tolerant); wire config in `index.js` + `.env.template`; mount in `app.js` (new `/api/v1/account` group + tight limiter, no Turnstile changes); Jest tests with stubbed clients. The user handles git + runs tests.
+
+---
+
+## 2026-07-02 — Phase 3 verified complete
+
+User confirmed **Slice 3c** (first-login opt-in migration) passes manual verification. With 3a/3b already verified, **Phase 3 is done** — logged-in users can create, switch, rename, and delete multiple named cloud files, and first-login local→cloud migration works. Large-file testing (→ per-file size limit) is deliberately deferred; it doesn't block Phase 4. **Next: Phase 4 — Node server layer (on non-prod).**
+
+---
+
 ## 2026-07-02 — Defer production Supabase to the beta gate; Phase 4 is now non-prod-only
 
 Planning tweak — **no code.** The user questioned why Phase 4 provisions the **production** Supabase project when we're nowhere near production-ready. Confirmed it doesn't need to, and it's more consistent with **ADR-014** ("non-prod only for now; defer prod until core is proven") to move it.

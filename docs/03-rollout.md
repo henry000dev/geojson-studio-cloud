@@ -82,19 +82,37 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 
 - **Goal:** add the server-side layer the paid product needs — built and tested entirely against the **existing non-prod** Supabase project. **No production project yet** (that's deferred to the Phase 6 beta gate — ADR-014).
 - **Why no prod here:** nothing in Phases 4–5, and even Stripe development in Phase 8, requires the production project. The Node layer only needs *a* Supabase project with a `service_role` key — non-prod already has one. Provisioning prod now would just create a production footprint to maintain long before any real user touches it. See [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first).
-- **Work:**
-  - Stand up the **server layer in the existing Node API** ([ADR-020](02-decisions.md#adr-020--the-server-side-layer-is-the-existing-node-api-not-edge-functions)): middleware that verifies the Supabase JWT + a `service_role` Supabase client, pointed at **non-prod**. First use = **account deletion** (needs `service_role`).
-- **Validation:** an authenticated Node endpoint verifies a non-prod Supabase JWT and performs a privileged op (account deletion cascades correctly).
-- **Risk:** low–medium — server secrets (`service_role`) must be handled right, but there's no production footprint to get wrong yet.
+- **Work** (design captured in [ADR-026](02-decisions.md#adr-026--server-side-supabase-integration-jwt-verification-getuser-service_role-admin-client-account-deletion); all wired to **non-prod**):
+  - Add `@supabase/supabase-js` to `geojson-studio-api`; build a **verify client** (publishable key) + a **`service_role` admin client** from injected config (`services/supabaseClients.js`).
+  - **`createSupabaseAuth` middleware** (mirrors `createSessionAuth`): verifies the caller's Supabase JWT via **`supabase.auth.getUser`**, attaches `req.supabaseUser`, else `401`. Reusable by the Phase 5 account area.
+  - **`POST /api/v1/account/delete`** (`routes/accountRoute.js` + controller + `services/accountService.js`): deletes **the caller's own account only** (`req.supabaseUser.id`, never a body id) via `admin.deleteUser` → cascades to `user_files` + `user_settings`; tolerant of a repeat call. Mounted as a new `/api/v1/account` group with its own tight rate limiter; **no change to the Turnstile-gated convert/dataset paths**.
+  - New env/secrets (non-prod): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (**secret, server-only**), `ACCOUNT_API_ENABLED` (ships dark). Documented in `.env.template`.
+- **Validation:** with `ACCOUNT_API_ENABLED` on, a real non-prod dev-login token → `POST /api/v1/account/delete` verifies the JWT and deletes the user; confirm `user_files`/`user_settings` rows cascade away; a bad/absent token → `401`; a repeat call → clean success. Jest tests inject **stubbed** Supabase clients (no live network).
+- **Risk:** low–medium — server secret (`service_role`) handling and the self-only-deletion authz must be right, but there's no production footprint to get wrong yet.
 
 ## Phase 5 — Account area + compliance
 
-- **Goal:** self-service account management (ADR-019) and the compliance basics for holding user data.
-- **Work:**
-  - **Account area** (user-facing, *not* an internal admin panel — the Supabase + Stripe dashboards are that): storage **usage** (a Postgres sum / view), **data export** (download my files + settings), **delete account** (Node + `service_role` → cascade), and later a **"Manage billing"** link to the Stripe Customer Portal.
-  - **Privacy policy + Terms**; terms acceptance at signup.
-- **Validation:** a user can see usage, export their data, and delete their account (cascade verified); policies published.
-- **Risk:** low–medium.
+- **Goal:** self-service account management (ADR-019) and the compliance basics for holding user data. Design agreed as [ADR-027](02-decisions.md#adr-027--phase-5-account-area--compliance). **All client-direct — no new Node endpoints** (deletion reuses the Phase 4 endpoint); two small read-oriented non-prod migrations. Sliced like earlier phases (build green between slices; git + e2e run by the user).
+
+### Slice 5a — compliance static pages
+
+- `public/privacy.html` + `public/terms.html`: hand-written static HTML mirroring `public/about.html` (self-contained, same theming; served by the existing nginx static/SPA-fallback — **no infra change**, crawlable). Draft content authored now; the user finalises the legal text later. Linked from the footer / about; consumed by 5c's signup checkbox and the account page.
+- **Validation:** both pages render at `/privacy.html` and `/terms.html` in dev and a production build; styling matches `about.html`; flag-off / anonymous unaffected.
+
+### Slice 5b — My Account page (usage · export · delete)
+
+- `supabase/migrations/0003_storage_usage_view.sql`: `public.user_storage_usage` (`security_invoker = on`; `sum(octet_length(geojson::text))` + `count(*)`; `grant select` to `authenticated`, revoke `anon`). Applied to non-prod by the user.
+- `/account` route → lazy, code-split `AccountView.vue`; a guard redirects non-flag / logged-out visitors to `/`; navigation propagates `?ff=cloud`; an **Account** entry is added to the `AccountMenu` overlay. Shows **email** (auth store), **storage used** (client-direct read of the view), **Export my data** (client-direct fetch of `user_files` + `user_settings` → one downloadable JSON bundle), and **Delete account** (calls the Phase 4 `POST /api/v1/account/delete` with the Supabase bearer token → sign out → anonymous `/`). A **"Manage billing"** link is a Phase 8 stub.
+- **Validation:** a logged-in dev sees their email + a correct storage figure; export downloads a complete bundle; delete removes the account (cascade confirmed) and drops to the anonymous path; a second account sees only its own usage/export (RLS on the view); flag-off unaffected. `ACCOUNT_API_ENABLED` must be on for delete.
+
+### Slice 5c — terms acceptance
+
+- `supabase/migrations/0004_user_profiles.sql`: `public.user_profiles` (one row per user, `user_id` PK → `auth.users` `on delete cascade`; `terms_accepted_at`, `terms_version`, timestamps; owner-scoped RLS select/insert/update; `updated_at` trigger). Applied to non-prod by the user.
+- The signup tab gains a **required** "I agree to the Terms and Privacy Policy" checkbox gating **both** Create-account and Continue-with-Google, linking to 5a's pages. A first-login `recordTermsAcceptance()` hook (flag-on, post-auth, beside `cloud-settings-bootstrap.js`) idempotently writes `terms_accepted_at`/`terms_version` when the profile row is absent (see ADR-027: no authenticated write is possible at the signup instant under confirm-email / OAuth).
+- **Validation:** signup is blocked until the box is ticked (email + Google); after first login a `user_profiles` row exists with the timestamp/version; a repeat login neither duplicates nor overwrites it; flag-off / anonymous never touches the table.
+
+- **Validation (phase):** a user can read usage, export their data, delete their account (cascade verified), and must accept terms to sign up; privacy + terms pages published. Two-account RLS holds on the usage view + profile table.
+- **Risk:** low–medium — mostly app-repo UI plus two small read-oriented migrations; the only privileged op (delete) already exists and is tested.
 
 ## Phase 6 — Free beta / early access
 

@@ -25,9 +25,12 @@
 - **Unify the two JWTs** — the existing Turnstile session JWT (for the conversion API) and the Supabase user JWT are independent. Could be unified later so logged-in users skip the Turnstile gate on the conversion API. Not needed for v1.
 
 ## Compliance / ops
-- **Privacy policy + terms of service** — required before opening accounts to real users (**now Phase 5**).
-- **Account deletion + data export** — GDPR-style flows (**now Phase 5**); deletion needs the Node `service_role` (ADR-020), cascading via the `on delete cascade` FKs.
-- **Backup tier** — confirm Supabase backup/retention settings when provisioning for real (Phase 4).
+- **Privacy policy + terms of service** — the *pages + signup acceptance* are **Phase 5** ([ADR-027](02-decisions.md#adr-027--phase-5-account-area--compliance): static `privacy.html`/`terms.html` + a required signup checkbox, recorded in `user_profiles` on first login). The legal **content** is the user's to finalise — the drafted pages are a starting point.
+- **Terms re-acceptance on version bump** — v1 records `terms_version` at first login only; it does **not** re-prompt when the current version changes. Add a re-acceptance gate if terms are revised after launch.
+- **Reconcile `about.html` privacy section at go-public** — `public/about.html` §04 ("Privacy & data") states "no server/cloud storage", true only for the anonymous free tier. Update it (or split free-vs-cloud) at Phase 7 launch, when cloud stops being dark.
+- **Account deletion + data export** — deletion is **done** (Phase 4: Node `service_role` → cascade via the `on delete cascade` FKs); **data export** is **Phase 5** (client-direct bundle — ADR-027). Export **as a zip of individual `.geojson` files** (v1 exports one JSON bundle) is deferred.
+- **`user_profiles` future fields** — the generic per-user table lands in Phase 5 with only terms columns; display name and other non-preference account fields can be added later without restructuring.
+- **Backup tier** — confirm Supabase backup/retention settings when provisioning the **production** project (the Phase 6 beta gate — ADR-014).
 
 ## Phase 3 follow-ups (deferred UI/UX & cleanup)
 
