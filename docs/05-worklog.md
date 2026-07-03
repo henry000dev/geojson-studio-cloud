@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-07-03 — cloud-epic live on staging; deploy reconfiguration verified (ADR-028)
+
+User verified the whole ADR-028 setup end-to-end: **`cloud-epic` → `staging.geojsonstudio.com`** (cloud live behind `?ff=cloud`, account flow working), **`main` → production** unchanged, and the **`staging` branch deploys nowhere** (trigger flipped to `[cloud-epic]` on both `cloud-epic` and `staging`, both repos; the staging branch reaches prod only via a PR into `main`). Staging reuses the **non-prod** Supabase (no new project); `ACCOUNT_API_ENABLED=true` on `backend-staging` so account deletion works there too.
+
+**Debugging captured (will recur at the prod gate):**
+- **Google OAuth returned to `localhost`** on staging → Supabase fell back to the **Site URL** because the staging `redirect_to` didn't match the **Redirect URLs** allow-list. Fixed by adding **both** `https://staging.geojsonstudio.com` **and** `https://staging.geojsonstudio.com/**` — the bare origin matters because the app redirects to the root `/?ff=cloud`, which `/**` alone didn't match. (Locally this was masked: a redirect to the same origin as the Site URL is auto-allowed.)
+- **`emailRedirectTo`** added to `signUpWithPassword` (`auth.js`) so email-confirmation links follow the current origin (localhost / staging / prod) instead of the single Site URL.
+
+**Next: the UI/UX revamp** — the largest remaining pre-production workstream (all the new cloud surfaces), iterated locally + verified on staging.
+
+### Where to resume — UI/UX revamp
+- Inventory + polish the new cloud surfaces: LoginDialog, AccountMenu, AccountView, CloudMigrationPrompt, MyFilesDialog (privacy/terms **content** is the user's). Then the loose ends (per-file size limit, storage constraints, legal content) → final polish → **Phase 6** production. Prod provisioning (separate Supabase project + Google callback + per-env `VITE_SUPABASE_*`) remains the ADR-014 gate.
+
+---
+
 ## 2026-07-03 — Branch/deploy decision: cloud-epic → staging (Option 2, ADR-028); near-term plan = staging preview + UI/UX polish
 
 Planning + CI wiring — **no app code.** Decided how to get the long-lived `cloud-epic` branch onto a real deployed environment for validation + polish **before** the production gate. Recorded as **ADR-028**.
