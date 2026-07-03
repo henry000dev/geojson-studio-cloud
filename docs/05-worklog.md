@@ -4,6 +4,67 @@
 
 ---
 
+## 2026-07-03 — Branch/deploy decision: cloud-epic → staging (Option 2, ADR-028); near-term plan = staging preview + UI/UX polish
+
+Planning + CI wiring — **no app code.** Decided how to get the long-lived `cloud-epic` branch onto a real deployed environment for validation + polish **before** the production gate. Recorded as **ADR-028**.
+
+**Decision (Option 2):** repoint the staging deploy from the `staging` branch to `cloud-epic` (both repos), so `cloud-epic` → `staging.geojsonstudio.com` while `main` → production stays untouched. The `staging` branch stays a normal integration branch (push + PR to `main`) but deploys nowhere. **Key gotcha:** GitHub Actions runs the workflow **from the pushed branch**, so the trigger change must land on **both** cloud-epic (to enable) **and** the `staging` branch (to stop it clobbering the cloud-epic build); `main` keeps its inert copy. Options 1 (keep staging branch deploying) and 3 (dedicated `cloud.` subdomain) considered — rejected / reserved.
+
+**CI edits staged on cloud-epic (this session):**
+- **app** `.github/workflows/deploy-staging.yml` — trigger `[staging]`→`[cloud-epic]` + `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` build-args; **`Dockerfile.staging`** — matching `ARG`/`ENV`.
+- **api** `.github/workflows/deploy-staging.yml` — trigger `[staging]`→`[cloud-epic]` + `SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY,SUPABASE_SERVICE_ROLE_KEY,ACCOUNT_API_ENABLED=true` on `--set-env-vars`.
+
+**Cloud on staging reuses the existing non-prod Supabase (no new project).** Still needs the user to: create the `staging` GitHub Environment Variables/Secrets (non-prod Supabase values) in **both** repos; add the staging origin to the non-prod Supabase Auth **Redirect URLs / Site URL** (OAuth + email confirmation); apply the same trigger change on the **`staging` branch**; confirm `staging.geojsonstudio.com` is domain-mapped to `frontend-staging`. (Push cloud-epic *before* the GH vars exist = dark deploy to verify the pipeline; create them + re-push = cloud live.)
+
+**Near-term plan (re-sequenced; see rollout note):** (1) reconfigure deploys, (2) verify cloud on staging incl. `?ff=cloud`, (3) UI/UX revamp of all new cloud surfaces (pulls the **landing / Phase 7 Stage 1** forward), (4) bugs & loose ends (per-file size limit, legal content, storage constraints), (5) final polish → then **Phase 6** production (**kept deferred**).
+
+**Docs touched:** new **ADR-028**; rollout gains the near-term note before Phase 6.
+
+### Where to resume — reconfigure + verify on staging
+- User: create the staging GH env vars/secrets (both repos) + Supabase Auth URLs for the staging origin + the `staging`-branch trigger edit + confirm the domain mapping, then push cloud-epic → verify `staging.geojsonstudio.com` + `?ff=cloud`. Then the **UI/UX revamp** (biggest workstream) — best iterated locally, verified on staging. User handles git.
+
+---
+
+## 2026-07-03 — Phase 5 verified complete
+
+User verified the account area against **non-prod**: the `/account` page shows email + storage used, and **account deletion succeeded** end-to-end (after starting the local backend API so the Phase 4 delete endpoint was reachable). Reports being happy with it. With 5a (compliance pages) + 5b (account page: usage / export / delete) + 5c (terms acceptance) all in, **Phase 5 is done.** The one open Phase-5 thread is the user finalising the **legal content** of the drafted `privacy.html` / `terms.html` before real users arrive.
+
+**Next: Phase 6 — free beta / early access**, the **production-provisioning gate** (ADR-014) — the first time the epic leaves non-prod.
+
+---
+
+## 2026-07-02 — Phase 5 implemented (5a–5c: account area + compliance) — code-complete
+
+Built all three Phase 5 slices per ADR-027. **Build clean** (vite 8 / rolldown, ~1.05s); the code-split held — `AccountView`, `terms-acceptance`, and the account UI stay out of main, and `supabase-client` remains a separate ~201 kB async chunk (no SDK in main). Ships behind `?ff=cloud`. **Pending the user: apply `0003` + `0004` to non-prod, plus the manual gate below.**
+
+**Slice 5a — compliance pages (app repo):**
+- `public/privacy.html` + `public/terms.html` — hand-written static pages mirroring `about.html` (shared theming, TOC, sections, footer), served by nginx's static fallback at `/privacy.html` / `/terms.html`. Draft content with `[placeholders]` for owner-specific legal bits (legal entity, governing law, minimum age); user finalises later.
+- `public/about.html` — added a footer link row (App / About / Terms / Privacy).
+
+**Slice 5b — My Account page (cloud + app repos):**
+- `0003_storage_usage_view.sql` — `public.user_storage_usage` (`security_invoker`; `sum(octet_length(geojson::text))` + `count(*)`; owner-scoped via user_files RLS; grant select to authenticated).
+- `src/views/AccountView.vue` — lazy / code-split `/account` route: email, storage used, **Export my data** (client-direct bundle → JSON download), **Delete account** (Phase 4 endpoint + confirm → sign out → anonymous `/`), a Phase 8 billing stub, and Privacy/Terms links.
+- `src/services/account/account-data.js` — client-direct `getStorageUsage` / `buildExportBundle` / `deleteAccount`.
+- `src/router/index.js` — `/account` route + `beforeEach` guard (cloud flag on + signed in, else redirect to `/`; flag-preserving nav; stays dark when the flag is off).
+- `src/components/auth/AccountMenu.vue` — an "Account" item (→ `/account?ff=cloud`) above Sign out.
+- `src/constants/api-constants.js` + `src/config/index.js` — `API_ENDPOINT_ACCOUNT_DELETE` / `config.api.accountDelete`.
+
+**Slice 5c — terms acceptance (cloud + app repos):**
+- `0004_user_profiles.sql` — generic per-user `public.user_profiles` (owner-only RLS: select/insert/update; **no delete** — cascade only); first columns `terms_accepted_at` + `terms_version`.
+- `src/components/auth/LoginDialog.vue` — a **required** terms checkbox on the signup tab (links to the pages) gating both **Create account** and **Continue with Google** (Google gated only in signup mode).
+- `src/services/account/terms-acceptance.js` — `recordTermsAcceptanceOnFirstLogin()` (idempotent upsert; `TERMS_VERSION = "2026-07-02"`), wired **fire-and-forget after mount** in `main.js` (flag-on only).
+
+**Not yet verified — the Phase 5 gate (needs the user):**
+1. Apply `0003` + `0004` to non-prod (SQL Editor); confirm the view + table + RLS per the migrations README.
+2. Compliance: `/privacy.html` + `/terms.html` render and are styled like about.html; review/finalise the legal content + `[placeholders]`.
+3. Account page: flag-on, signed in → AccountMenu → **Account**; email + storage figure correct; **Export** downloads a complete bundle; **Delete account** removes the account (cascade) → anonymous. (Needs `ACCOUNT_API_ENABLED=true` on the API + CORS for the app origin.)
+4. Terms: signup blocked until the box is ticked (email + Google); after first login a `user_profiles` row exists with timestamp + version; a repeat login doesn't overwrite it; two-account RLS holds on the view + table; flag-off / anonymous never touches either.
+
+### Where to resume — Phase 5 verification, then Phase 6
+- Once the user applies the migrations + passes the gate, Phase 5 is done. Next is **Phase 6 — free beta / early access**, the **production-provisioning gate** (ADR-014): create the prod Supabase project, apply `0001`–`0004`, wire per-env `VITE_SUPABASE_*`, then the allowlist cohort. User handles git + e2e + migrations.
+
+---
+
 ## 2026-07-02 — Phase 5 design agreed (ADR-027); ready to implement Slice 5a
 
 Design session for **Phase 5 — account area + compliance** — **no code yet.** Grounded in the real repos first (app `vue-router` with base = `import.meta.env.BASE_URL`; the `public/about.html` static-page pattern served by nginx's `try_files … /index.html` fallback; api Phase 4 `createSupabaseAuth` + `POST /api/v1/account/delete`). Recorded as **ADR-027**; rollout Phase 5 fleshed into three slices.

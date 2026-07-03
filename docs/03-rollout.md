@@ -114,6 +114,13 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 - **Validation (phase):** a user can read usage, export their data, delete their account (cascade verified), and must accept terms to sign up; privacy + terms pages published. Two-account RLS holds on the usage view + profile table.
 - **Risk:** low–medium — mostly app-repo UI plus two small read-oriented migrations; the only privileged op (delete) already exists and is tested.
 
+> **Near-term re-sequencing (2026-07-03).** With Phases 0–5 done and verified on non-prod (laptop only), the immediate focus is **validating + polishing the cloud experience on a real deployed environment** before the Phase 6 production gate. The `cloud-epic` branch is deployed to **`staging.geojsonstudio.com`** ([ADR-028](02-decisions.md#adr-028--deploy-the-cloud-epic-branch-to-staging-option-2) — Option 2: `cloud-epic` → staging; `main` → production unchanged). Order of work:
+> 1. **Reconfigure branches/deploys** — repoint staging to `cloud-epic` (both repos); wire the existing **non-prod** Supabase into the staging build (build-args + backend env) and add the staging origin to the non-prod Supabase Auth URLs. No new Supabase project; production untouched.
+> 2. **Verify on staging** — cloud-epic is live at `staging.geojsonstudio.com`; `?ff=cloud` reveals **and exercises** the account flow end-to-end on a real domain (Google OAuth + email confirmation).
+> 3. **UI/UX revamp** — polish every new cloud surface (LoginDialog, AccountMenu, AccountView, the `privacy.html`/`terms.html` pages, CloudMigrationPrompt, MyFilesDialog) to production quality; testable on staging. **Pulls the landing (Phase 7 Stage 1 — the dark client-rendered preview) forward** here, since it needs no infra.
+> 4. **Bugs & loose ends** — per-file size limit + large-file testing, legal-page content, storage-quota constraints, and the smaller backlog items.
+> 5. **Final polish**, then **Phase 6** (production provisioning + beta) — **kept deferred** until the experience is polished and the user signs off.
+
 ## Phase 6 — Free beta / early access
 
 - **Goal:** real-world validation at zero monetary risk (the original Phase 4 goal). **This is the production gate** — the first point real external users arrive, and the user's explicit "non-prod is good enough" sign-off.

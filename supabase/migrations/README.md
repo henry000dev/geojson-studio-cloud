@@ -10,6 +10,8 @@ Migrations are applied in **filename order**:
 |---|---|
 | `0001_files_and_user_settings.sql` | Phase 2 schema: `public.user_files` + `public.user_settings`, the `updated_at` trigger, and owner-only RLS. |
 | `0002_multi_file.sql` | Phase 3: drop the one-row-per-user index on `user_files`, add `user_files.name` (multiple named files per user). |
+| `0003_storage_usage_view.sql` | Phase 5 (account area): `public.user_storage_usage`, a `security_invoker` view summing each user's GeoJSON bytes + file count, read client-direct (owner-scoped via `user_files` RLS). |
+| `0004_user_profiles.sql` | Phase 5 (compliance): `public.user_profiles`, a generic per-user table (owner-only RLS) whose first columns record Terms/Privacy acceptance (`terms_accepted_at`, `terms_version`), written by the client on first login. |
 
 ## How to apply (manual, for now)
 
@@ -41,5 +43,23 @@ After applying `0002`:
 
 - **Table Editor** → `user_files` now has a **`name`** column.
 - **Database → Indexes** → `user_files_one_per_user_uq` is **gone**, so a user can hold multiple `user_files` rows (the existing owner-only RLS policies already cover them).
+
+After applying `0003`:
+
+- **Database → Views** (or Table Editor) → `user_storage_usage` exists.
+- **Owner-scoped read** — because the view is `security_invoker`, a signed-in user querying it sees only their own row. Exercise it as a real user (not the privileged SQL Editor role):
+  ```sql
+  set local role authenticated;
+  set local request.jwt.claims to '{"sub":"<a real user_id>","role":"authenticated"}';
+  select * from public.user_storage_usage;   -- expect: only that user's aggregate
+  reset role;
+  ```
+  A user with no files simply returns **no row** (the app reports that as zero).
+
+After applying `0004`:
+
+- **Table Editor** → `user_profiles` exists with **RLS enabled**; columns `terms_accepted_at`, `terms_version`, timestamps.
+- **Authentication → Policies** → three owner-only policies (select / insert / update); **no delete** policy (the row goes only via the account-deletion cascade).
+- **Anon is locked out** — same `set local role anon; select * from public.user_profiles;` check as `0001` (expect: permission denied).
 
 The full cross-user isolation proof (two real accounts can't see each other's rows) happens once the app's remote provider can write data — see `docs/05-worklog.md`.
