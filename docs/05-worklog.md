@@ -4,6 +4,141 @@
 
 ---
 
+## 2026-07-04 — Session paused for handoff: 4 of 6 revamp chunks done, two rounds remain
+
+The UI/UX revamp (rollout near-term step 3) is being handed to a **fresh session**. This entry is the resume point; the four dated entries below have the per-chunk detail.
+
+**Done (4 of 6 chunks), each verified visually light + dark via the scratchpad fake-session Playwright harness — real-account round-trips still owed (see the backlog list at the end):**
+1. Landing page (Phase 7 Stage 1 pulled forward) + `/` `/app` routes.
+2. `/login` page (LoginDialog deleted; forgot/reset flow added).
+3. In-app chrome — avatar account menu + menubar active-file chip + AppMenu brand fix.
+4. `/files` page (MyFilesDialog deleted).
+
+**Round A — Account page polish, round 2 (task #6).** The account page was rebuilt as sectioned PrimeVue Panels and the user approved it but said *"better, but we'll come back and polish it up again"* — **the specific critiques were not captured, so round 2 starts by asking the user what they want changed.** One item is already scoped: wire a **Security panel** (change / reset password) into `AccountView.vue`, **reusing the `/login` reset flow** — `auth.js` already has `resetPasswordForEmail` + `updatePassword`; the Security panel was deliberately deferred out of the account chunk so the reset flow was built once, on `/login`. Fold in any layout refinements now that the account page-family (`/login`, `/account`, `/files`) shares one idiom.
+
+**Round B — Final alignment pass across remaining cloud surfaces (task #5).**
+- **`NotFound.vue`** — the **last wordmark holdout**: still uses `logo-rectangle-dist.svg`, which follows the OS `prefers-color-scheme` rather than the app's `html.dark` toggle. Apply the about.html brand pattern (`logo-icon-only.svg` + HTML "GeoJSON Studio" text styled by tokens), as already done on the landing nav, the account/login/files headers, and AppMenu.
+- **`CloudMigrationPrompt.vue`** — polish to production quality (not reviewed this session).
+- **`public/privacy.html` / `public/terms.html`** — styling check against the current design language (the *content* stays the user's).
+- **Dark-mode + responsive audit** across every cloud surface — a deliberate cross-surface sweep, beyond the per-chunk harness shots.
+- **Gather the user's `/login` cosmetic notes** — after the login chunk the user said *"I noticed some small cosmetic issues but we will come back and address these later"*; specifics not captured, so this round also **starts by asking**.
+- **Docs sync** at the end.
+
+**Consolidated user-verification backlog (real accounts, staging/local — pending; does not block the two rounds).** Nothing below is checked against real Supabase — the harness only proves layout/behaviour with mocked data:
+- *Landing/routing:* `/?ff=cloud` → landing (light/dark/mobile); bare `/` → editor unchanged; `/app`; flag-off e2e.
+- *`/login`:* email sign-in + signup→confirm→sign-in; Google OAuth returning to `/app?ff=cloud`; the full forgot→email→reset→lands-in-editor flow (first time it exists — confirm the staging redirect allow-list covers `/login?ff=cloud&mode=reset`).
+- *Chrome:* chip rename persists + reflects in the list; Google avatar photo renders (harness shows only the initial badge); unsaved-blank chip after File→New.
+- *`/files`:* open/switch round-trip; New File → blank editor → first edit creates a row; delete (incl. the open file → blank editor); rename persistence; the "Open" badge on a cold `/files` load; two-account isolation.
+- *Account:* real usage figures; avatar/Google variant; export + delete round-trips.
+
+**Working tree.** All four chunks live in the **app repo** (`geojson-studio-app`, `cloud-epic`) working tree; these doc edits are in the **cloud repo**. Git is the user's — the fresh session picks up the live working tree as-is (deleted: `LoginDialog.vue`, `MyFilesDialog.vue`; new: `LandingView`/`RootView`/`LoginView`/`FilesView`/`ActiveFileChip`; rewritten: `AccountView`/`AccountMenu`). The scratchpad harness scripts (`shoot-{landing,account,chrome,files}.cjs`, `capture-hero.cjs`; PROJECT_REF `eprkeuxtnnijaenqbrie`) are session-local and not in either repo.
+
+### Where to resume
+1. **Round A (task #6)** — ask the user for their account-page round-2 critiques; wire the Security panel via the existing reset flow; apply layout refinements.
+2. **Round B (task #5)** — NotFound logo fix, CloudMigrationPrompt polish, privacy/terms styling, dark/responsive audit; gather the user's `/login` cosmetic notes; sync docs.
+
+---
+
+## 2026-07-04 — /files page built; MyFilesDialog deleted (ADR-029 completed)
+
+Fifth revamp chunk. My Files is now a **dedicated route** — the second half of ADR-029 (ADR-018 status annotated: only the browsing *surface* moved; the file lifecycle rules are unchanged).
+
+**Built (app repo):**
+- **`src/views/FilesView.vue`** (new, ~9 kB async chunk) — the library page on the account area's idiom (grid background, brand header, a PrimeVue Panel): **table layout** (Name / Last edited columns; ellipsised names; relative dates), active row highlighted with an **"Open" tag**, per-row **inline rename** (Enter/Esc + check/cancel buttons) and **delete** (ConfirmDialog), **New File** in the panel header, empty + loading + error states, "Back to editor" footer. Responsive: the date column drops at 640px.
+- **Behavioural shift from the dialog:** the editor is unmounted while the page shows, so **open = `adoptActiveFile` + navigate to `/app`** (the editor's startup load reads the adopted row through the seam — no in-place `reloadFromStorage`); **New File = `startNewBlank` + navigate**; deleting the open file detaches it, so the editor returns blank. On a **cold direct load** the view awaits `ensureResolved()` before listing so the "Open" badge is correct.
+- **Router** — `/files` route (lazy); the guard's signed-in branch now covers `Account` + `Files` (logged-out → `/login`).
+- **`AccountMenu`** — the overlay menu gains **My Files** (above Account). **`FileToolbar`** — the "My Files" button navigates to `/files` (dialog import/state removed). **`MyFilesDialog.vue` deleted.**
+
+**Build:** clean; FilesView is its own async chunk; flag-off untouched. Verified visually light + dark via the fake-session harness (`shoot-files.cjs` — note: the `user_files` mock must honour `limit=1`, since `resolveMostRecentFile`'s `maybeSingle()` errors on multiple rows).
+
+**Not yet verified (needs the user, real accounts):** open/switch round-trip (file list → open → editor shows that file), New File → blank editor → first edit creates a row, delete (incl. the open file → blank editor on return), rename persistence, the "Open" badge on a cold `/files` load, two-account isolation on the list, flag-off e2e.
+
+### Where to resume — account round-2 polish, then the alignment pass
+- Task #6: gather the user's account-page round-2 critiques + the noted /login cosmetic issues; hook up the Security panel using the /login reset flow. Then task #5 (CloudMigrationPrompt, NotFound logo, compliance styling, dark/responsive audit). ADR-029 is now fully realised; remaining known wordmark holdout: `NotFound.vue`.
+
+---
+
+## 2026-07-04 — In-app chrome: avatar account entry, menubar file chip, brand fix
+
+Fourth revamp chunk (task: in-app chrome). The user flagged the signed-in account entry's look (raw email as a text button) and the active file's name sitting as a button on the File toolbar "next to Export, which is weird".
+
+**Built (app repo):**
+- **`src/components/nav/ActiveFileChip.vue`** (new, ~1.6 kB async chunk, flag-gated like AccountMenu) — a pill chip in the menubar's end cluster showing the active cloud file (`pi-cloud` icon + name, ellipsised): **click to rename inline** (Enter/blur saves, Esc cancels; store `rename()`); a blank unsaved file (no row yet — ADR-018 lazy creation) shows an italic "Untitled", non-clickable, with an explanatory tooltip. **Designated future home of the ADR-025 save-status indicator.** Self-gates on `isLoggedIn`.
+- **`AccountMenu.vue`** — signed-in entry is now an **avatar chip** (Google `avatar_url` photo or initial badge + caret; tooltip "Account") instead of the email text button; the overlay menu gains a **header** (name/email via the Menu `#start` slot) above Account / Sign out. Signed-out "Sign in" button unchanged (→ `/login`).
+- **`FileToolbar.vue`** — the cloud button's label is a fixed **"My Files"** (was: the active file's name); it remains only the library entry point.
+- **`AppMenu.vue`** — branding switched to the about.html pattern (**`logo-icon-only.svg` + HTML "GeoJSON Studio" text** + Beta tag), fixing the wordmark's OS-vs-`html.dark` mismatch in the editor itself; `min-height: 42px` preserves the previous menubar height. *(NotFound.vue is now the last wordmark holdout — alignment pass.)*
+
+**Build:** clean; ActiveFileChip + AccountMenu are separate async chunks; flag-off fetches neither (branding change is the only flag-off-visible diff, deliberate bug fix). Verified visually light + dark via the fake-session harness (`shoot-chrome.cjs`): chip + avatar + brand render correctly; menubar brand now legible in dark mode.
+
+**Not yet verified (needs the user):** chip rename round-trip against real Supabase (persists + My Files list reflects it); Google-account avatar photo renders (harness only covers the initial badge); unsaved-blank chip state after File→New; menu header contents; flag-off menubar unchanged bar the new brand rendering; e2e.
+
+### Where to resume — /files page
+- Next: task #4 — replace MyFilesDialog with a `/files` page (ADR-029 pre-authorises the shape), wiring open/switch via `reloadFromStorage` after navigation back to `/app`; add a "My Files" item to the account overlay menu; then account round-2 polish (task #6), then the alignment pass (task #5).
+
+---
+
+## 2026-07-04 — /login page built; LoginDialog deleted (ADR-029)
+
+Third revamp chunk. Login is now a **dedicated route**, recorded as **ADR-029** ("cloud account surfaces are routes, not dialogs" — covers `/login` now and `/files` next; extends ADR-027, supersedes the Phase 1 dialog).
+
+**Built (app repo):**
+- **`src/views/LoginView.vue`** (new, ~11 kB async chunk) — centred-card auth page on the account page's visual idiom (grid background, icon+text brand, gs tokens). **Four modes** seeded from `?mode=`: `signin` (default; "Forgot password?" link), `signup` (terms checkbox gating both Create account **and** Google — unchanged rule), `forgot` (new), `reset` (new). Success → full navigation to `/app?ff=cloud` (ADR-004 re-bootstrap).
+- **Forgot/reset password flow** (previously missing entirely): `auth.js` gains `resetPasswordForEmail(email)` (recovery link targets `/login?ff=cloud&mode=reset`) and `updatePassword(newPassword)`; the recovery email signs the user in and lands on the reset form. `signInWithGoogle(redirectPath)` parametrised — the login page passes `/app` so the OAuth round-trip lands in the editor.
+- **Router** — `/login` route (lazy); guard extended: `/login` needs the flag and bounces signed-in users to `/app` **except** `mode=reset`; `/account`'s logged-out redirect now goes to **`/login`** (was: landing).
+- **`AccountMenu.vue`** — "Sign in" navigates to `/login` (dialog import/markup removed; chunk shrank ~6 kB → ~1.1 kB). **`LoginDialog.vue` deleted.**
+- **Landing** — nav "Sign in" → `/login`; cloud + Basic/Pro "Get early access" CTAs → `/login?mode=signup`.
+
+**Build:** clean; LoginView is its own async chunk; flag-off untouched. Visually verified signin/signup/forgot in light + dark (dev server screenshots; signup correctly disables both buttons until terms ticked).
+
+**Not yet verified (needs the user, real accounts on staging/local):** email+password sign-in and signup→confirm→sign-in round-trips from `/login`; Google OAuth now returning to **`/app?ff=cloud`**; the full **forgot→email→reset→lands in editor** flow (first time this exists — also confirm the staging `/**` redirect allow-list matches `/login?ff=cloud&mode=reset`); signed-in visits to `/login` bounce to the editor; flag-off e2e.
+
+### Where to resume — in-app chrome
+- Next chunk (task #3): avatar-chip account entry + the active-file name chip in the menubar (moving it off the File toolbar), plus the AppMenu wordmark dark-mode fix. Then `/files` (task #4), account round-2 polish (task #6), final alignment pass (task #5).
+
+---
+
+## 2026-07-04 — Account page redesigned (sectioned PrimeVue Panels)
+
+Second revamp chunk, same session as the landing. The user judged the Phase 5 account page "plain — looks like a dialog"; options were assessed (sectioned cards à la Stripe/Supabase; sidebar settings shell — premature until Phase 8; two-column dashboard; enrich-in-place) and **sectioned single-column** chosen, with the user's tweak: **PrimeVue `Panel`s, not custom cards** (matching FileExportDialog's panel usage). Sidebar shell noted as the post-Phase-8 evolution.
+
+**Rebuilt `AccountView.vue`** as four Panels (46rem column, grid background + brand header retained):
+- **Profile** — avatar (Google `user_metadata.avatar_url`, initial-badge fallback) + email + **Sign out** (new; lands on the landing with the flag, full navigation re-bootstrap per ADR-004); Member since (`created_at`), Sign-in method (`app_metadata.provider`).
+- **Plan & usage** — "Early access" Tag + note; **usage meter** (`ProgressBar`) against a **placeholder 1 GB allowance** (`QUOTA_BYTES` — real quotas are Phase 8/ADR-022) with bytes/file-count caption. Makes the storage-based-pricing story visible.
+- **Data & privacy** — export (unchanged mechanics) + **terms-acceptance record** (new client-direct read `getTermsAcceptance()` in `account-data.js`, owner-scoped by user_profiles RLS) + policy links.
+- **Danger zone** — delete (unchanged mechanics), error-tinted panel border/header via the unscoped-block override pattern (no `:deep()`).
+- Deferred into the /login chunk: a **Security panel** (password change/reset) — so the reset flow is built once.
+
+**Brand/logo dark-mode bug found & fixed:** `logo-rectangle-dist.svg` adapts via its internal `prefers-color-scheme` media query, i.e. it follows the **OS**, not the app's `html.dark` toggle — OS-light + app-dark rendered a black wordmark on a dark page. Fixed on the landing nav + account header with the **about.html brand pattern** (colour-stable `logo-icon-only.svg` + HTML "GeoJSON Studio" text styled by tokens). **Still affected (pre-existing, fix with their own chunks): `AppMenu.vue` menubar branding (chrome chunk) and `NotFound.vue` (alignment pass).**
+
+**Verification:** build clean (AccountView ~12 kB / LandingView ~17 kB async chunks; SDK still out of main). Visually verified light+dark via Playwright against the dev server using an **injected fake unexpired Supabase session + route-mocked REST reads** (scratchpad `shoot-account.cjs` — no real auth touched; note: with a signed-in session the colour mode comes from cloud settings (ADR-017), so dark is emulated via the OS `colorScheme`, not `localStorage`). **User still to verify on staging** (real account: avatar/Google variant, real usage figures, export/delete round-trip).
+
+### Where to resume — auth page (/login)
+- Unchanged: `/login` next (sign-in/up + Google + terms + forgot-password + Security panel hookup), then chrome (avatar chip + file-name chip + AppMenu logo fix), then `/files`, then the alignment pass (CloudMigrationPrompt, NotFound logo, compliance-page styling, dark/responsive audit).
+
+---
+
+## 2026-07-04 — UI/UX revamp begins: landing page built (Phase 7 Stage 1 pulled forward)
+
+First chunk of the UI/UX revamp (rollout near-term step 3). **Session decisions** (user): design order is **landing first** (sets the end-to-end look), then the other surfaces; the Stage 1 landing is built as the **real product design** (ported to static HTML at Stage 2, not redesigned); pricing shows **three placeholder tiers** — Free / Basic **$5/mo** / Pro **$15/mo** with placeholder feature bullets (real plans still the user's, per backlog); the visual direction **extends the existing identity** (PrimeVue blue + the `about.html` design language: Funnel Sans / JetBrains Mono, grid-paper background, `#2e5fa3` accent, JSON-syntax motifs). Also agreed for later chunks: **login becomes a dedicated page** (replacing LoginDialog, adding the missing forgot-password flow), **My Files becomes a page** (replacing the dialog), the **account entry** gets an avatar-chip treatment, and the **active-file name moves out of the File toolbar** into a menubar document chip (future home of the ADR-025 save-status indicator). The dialogs→pages change gets its own ADR when built.
+
+**Built (app repo, per ADR-024 Stage 1):**
+- **`src/views/LandingView.vue`** (new, async chunk ~13 kB js + 11 kB css) — the full marketing page: sticky nav, hero (tagline *"The modern, intuitive GeoJSON editor"* + CTAs), a real editor screenshot in a browser-frame mock (light/dark variants swap with the resolved colour mode; only one downloads), 6-card feature grid, free-vs-cloud "duality" split (JSON-snippet motif), 3-tier pricing, FAQ (`<details>`), closing CTA, footer. Plain HTML/CSS in one self-contained component for the Stage 2 static port; fonts injected on mount only; dark mode keys off `html.dark` (stamped pre-render by the colour-mode store — AccountView precedent); responsive at 900/640 px.
+- **`src/views/RootView.vue`** (new) — `/` branches by the flag: on → async LandingView, off → MapView (vanilla, byte-identical).
+- **Router** — `/` → RootView (name `Root`), **`/app` → MapView** (name `Editor`; route names were unreferenced). Account guard unchanged: logged-out flag-on visitors to `/account` now land on the landing.
+- **`AccountView.backToApp`** → `/app?ff=cloud` (the flag-on root is now the landing).
+- **`NarrowScreenWarningDialog` moved App.vue → MapView.vue** — editor-only; no longer covers the landing or `/account` on small screens.
+- **Hero screenshots** — captured off **staging** by a Playwright script (scratchpad; not the e2e suite) that seeds `welcomed` + IndexedDB (`GeoJSONStudio` v20, `geoJson` store) with `Data/taiwan.geojson` on the `about.html` origin page, then shoots 1440×900@2x; light (streets) + dark (`dark-v11` basemap) → `src/assets/img/landing/editor-{light,dark}.jpg` (jpeg q85, ~410/335 kB).
+- **Interim links:** all landing CTAs (incl. nav "Sign in" and the paid-tier "Get early access") → `/app?ff=cloud`; rewired to `/login` when the auth page lands.
+
+**Build:** clean (vite 8 / rolldown, ~2s). LandingView is its own async chunk — never fetched flag-off; no SDK in main; flag-off `/` structurally unchanged. Landing verified by full-page screenshots (light/dark/mobile) against the dev server.
+
+**Not yet verified (needs the user, on staging after push):** `/?ff=cloud` → landing (light + dark + mobile); bare `/` → editor unchanged; `/app` + `/app?ff=cloud` → editor; account page "Back to editor" → `/app?ff=cloud`; flag-off e2e suite.
+
+### Where to resume — auth page (/login)
+- Next chunk: dedicated `/login` route on the landing's design language (sign-in / create-account modes, Google, terms checkbox, confirm-email messaging, **new forgot-password flow** via `resetPasswordForEmail` + reset view); delete LoginDialog; rewire the landing/nav CTAs; record the dialogs→pages ADR. Then in-app chrome (avatar chip + file-name chip), then `/files`, then the alignment pass.
+
+---
+
 ## 2026-07-03 — cloud-epic live on staging; deploy reconfiguration verified (ADR-028)
 
 User verified the whole ADR-028 setup end-to-end: **`cloud-epic` → `staging.geojsonstudio.com`** (cloud live behind `?ff=cloud`, account flow working), **`main` → production** unchanged, and the **`staging` branch deploys nowhere** (trigger flipped to `[cloud-epic]` on both `cloud-epic` and `staging`, both repos; the staging branch reaches prod only via a PR into `main`). Staging reuses the **non-prod** Supabase (no new project); `ACCOUNT_API_ENABLED=true` on `backend-staging` so account deletion works there too.
