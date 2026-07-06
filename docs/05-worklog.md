@@ -4,6 +4,114 @@
 
 ---
 
+## 2026-07-06 — Session paused for handoff: UI/UX revamp COMPLETE; next is the user's real-account verification pass
+
+**The revamp (rollout near-term step 3) is finished and the user approved the final /login split layout ("I like this version much better").** This entry is the fresh-session resume point; the dated entries below (2026-07-04 → 2026-07-06 evening) hold the per-chunk detail. Build clean throughout; everything below was verified **only** via the session-local fake-session Playwright harness (mocked REST, light+dark+mobile) — **nothing new has been checked against real Supabase.**
+
+**What the revamp delivered (all in the app repo's `cloud-epic` working tree; git is the user's):**
+- Landing page + `/` `/app` routes; landing mobile-nav overflow fixed.
+- **`/login`** — split two-column page (brand/heading/benefits left, card right; stacks <900px); email form first, then an "or continue with" **2×2 OAuth grid: Google / GitHub / Microsoft (azure) / Facebook** (`constants/auth-constants.js`; `auth.signInWithOAuth`); sign-up leads with the terms checkbox gating submit + all providers; forgot/reset flows; no scrollbar at 1366×720 (page scrolls itself, auto-margin centring).
+- **`/account`** — sectioned panels on the export-dialog idiom + **section sidebar** (sticky, scroll-to, active tracking) + **Security panel** (inline password change + reset-link fallback; provider-aware note for OAuth accounts) + **Billing placeholder panel** (thin entry point to the future Stripe Customer Portal — ADR-022) + top back link.
+- **`/files`** — table page; New File button removed (File toolbar owns New); top back link.
+- **Chrome** — avatar menu + active-file chip (standard 6px/neutral hover); File toolbar order **New | Open | Import | Export** ("Open" = the old My Files button).
+- **`CloudMigrationPrompt`** — copy polish + **bug fix: it could never fire on login** (was hosted in FileToolbar, which unmounts when the default Draw tab takes over; now hosted in MapView, gated on cloud-mode + app-ready). **Re-opens the Phase 3c verification.**
+- **File name length limit** — `MAX_FILE_NAME_LENGTH = 100`: input `maxlength`s + store clamp + a CHECK constraint amended into `0002` (cloud repo, ADR-023 policy).
+- **Cross-cutting fix** — `#app` boxes routed pages at exactly 100vh; long pages (`/account`, `/files`, `/login`) now scroll internally with `background-attachment: local` so the grid paints the full height.
+- NotFound wordmark fixed (last holdout); privacy/terms checked — no changes needed.
+
+**Consolidated user-verification backlog (staging/local, real accounts) — the outstanding gate before the pre-Phase-6 loose ends:**
+1. **Re-apply `0002`** to non-prod (idempotent; adds the name-length CHECK), then a >100-char rename attempt.
+2. **Migration prompt (Phase 3c retest):** appears on login **without touching the File tab**; Save→first cloud file; Not now; no prompt when cloud files exist / local empty; flag-off never loads it.
+3. **/login:** email sign-in; signup→confirm→sign-in (checkbox gates submit + all four providers); **Google OAuth round-trip from the new grid** (regression); forgot→email→reset→lands in editor (redirect allow-list covers `/login?ff=cloud&mode=reset`); signed-in visits bounce; **on a real smallish laptop: no scrollbar, proportions feel right**.
+4. **/account:** password change (incl. mismatch/short errors) + the "send a reset link" path; Google-account variant shows the provider note (no password fields); sidebar scroll/highlight feel; real usage figures; avatar photo; export + delete round-trips.
+5. **/files:** open/switch; delete (incl. open file → blank editor); rename persistence (chip + list agree); "Open" badge on cold load; two-account isolation.
+6. **Landing/routing:** `/?ff=cloud` → landing (incl. mobile nav ≤480px: icon-only brand); bare `/` → editor unchanged; `/app`; flag-off e2e suite.
+7. **Chrome:** chip rename persists; Google avatar renders; unsaved-blank chip after File→New; "Open" toolbar button placement feels right.
+8. **New setup task (user):** configure **GitHub / Microsoft (azure) / Facebook** in the Supabase dashboard (OAuth apps + callback URL) — buttons error cleanly ("provider is not enabled") until then; then round-trip each. (Backlogged in `04-backlog.md`.)
+
+**Docs state:** overview + rollout step 3 marked revamp-complete; backlog has the provider-config task; `0002` carries the name CHECK. Harness scripts (`shoot-revamp.cjs`, `shoot-login2.cjs`; PROJECT_REF `eprkeuxtnnijaenqbrie`, fake session + route-mocked REST — note `user_files` mocks must honour `limit=1`) are **session-local scratchpad files, not in either repo**.
+
+### Where to resume
+1. The user runs the verification backlog above (and the Supabase provider config); fix whatever falls out.
+2. Then the remaining pre-Phase-6 loose ends: per-file size limit (user's large-file testing → pick the ceiling), legal content finalisation, storage-quota constraints.
+3. Then **Phase 6** — production provisioning (ADR-014 gate: prod Supabase project, apply `0001`–`0004`, per-env `VITE_SUPABASE_*`, Google + the new providers' callbacks on prod) + the beta allowlist.
+
+---
+
+## 2026-07-06 (evening) — /login pivoted to the split two-column layout; providers below email; laptop scrollbar fixed
+
+The spacious single column (entry below) still read "busy" to the user once four providers were stacked on top, and short laptop screens showed a vertical scrollbar. Pivoted to the **split layout** (the other option offered): brand + heading + mode copy (and the sign-up benefits checklist) on the **left**, the form card on the **right**; stacks to one centred column below 900px. Per the user, **providers moved below the email form** ("or continue with" divider), and they're now a **2×2 named-button grid** (Google/GitHub/Microsoft/Facebook) — half the height of the stack. Sign-up's terms checkbox sits above the Create-account button and still gates it plus all four providers.
+
+**Scrollbar fix:** same `#app`-boxes-the-page problem class as the account/files pages — the login root now scrolls itself (`height: 100vh; overflow-y: auto`, `background-attachment: local`) and the layout centres by **auto margins**, not flex centering (which clips the top when content overflows). Playwright-verified `scrollHeight <= clientHeight` at **1366×720** for both modes, light + dark; desktop + mobile shots clean (`shoot-login2.cjs`).
+
+**Unchanged:** auth logic, modes, gating rules, `auth-constants.js`, `signInWithOAuth` — this was template/CSS only. The user-verification items from the entry below still stand.
+
+---
+
+## 2026-07-06 (later) — /login cosmetic notes captured & fixed: spacious redesign + multi-provider OAuth UI
+
+The user's long-outstanding `/login` critiques finally landed: the sign-in and create-account modes looked too similar, and spacing was too compact. Offered two directions (split two-column vs. spacious single column) — **user chose the spacious single column**. Also new scope from the user: **more OAuth providers besides Google** — chose **GitHub, Microsoft (azure), Facebook**, *UI-only for now; the user configures each in the Supabase dashboard later.* Build clean (LoginView ~11.4 kB); verified signin+signup, light+dark, desktop+390px via the scratchpad harness (`shoot-login.cjs`).
+
+**Built (app repo):**
+- **`constants/auth-constants.js`** (new) — `OAUTH_PROVIDERS` (`google`/`github`/`azure`/`facebook` + labels + PrimeIcons) and `PROVIDER_LABELS`. One list drives the login buttons and the account page's wording. Listing a provider only renders its button — Supabase dashboard config still required per provider.
+- **`stores/auth.js`** — `signInWithGoogle(redirectPath)` generalised to **`signInWithOAuth(provider, redirectPath)`** (same redirect/flag mechanics; an unconfigured provider errors cleanly in the page's message area).
+- **`LoginView.vue` redesign** — card shape is now: **provider stack** (4 outlined "Continue with X" buttons) → "or continue with email" divider → email + password. Spacing opened up (card padding 2rem, field gaps 1.4rem, container gap 1.75rem, max-width 26→28rem). **Mode differentiation:** sign-up shows a **benefits checklist** under the heading (files everywhere / auto-saved / free in early access) and **leads with the terms checkbox**, which gates the provider stack right below it (the disabled state is self-explaining; same rule as before, now covering all providers). `providerLoading` locks the stack during a round-trip. Forgot/reset modes unchanged bar the roomier spacing.
+- **`AccountView.vue`** — sign-in method + the Security panel's no-password note now name the actual provider via `PROVIDER_LABELS` (was hard-coded "Google").
+
+**Not yet verified (needs the user):** Google round-trip regression from the new stack (only provider configured on non-prod); GitHub/Microsoft/Facebook buttons show a clean error until configured — **Supabase provider setup is a user task** (GitHub OAuth app, Azure app registration, Facebook app; each needs the Supabase callback URL). Signup: checkbox gating across all four + Create account.
+
+### Where to resume
+- The revamp's known punch-list is now **empty**. Remaining pre-Phase-6: the user's real-account verification backlog (incl. the 3c migration-prompt retest + `0002` re-apply), OAuth provider config in Supabase (new), per-file size limit, legal content. Then **Phase 6** (production gate, ADR-014).
+
+---
+
+## 2026-07-06 — Account sidebar + Round B (alignment pass) done; migration-prompt never-fired bug found & fixed
+
+Two user-requested tweaks, then the whole Round B alignment pass (app repo, `cloud-epic` working tree). Build clean; everything verified light + dark (+ mobile 390px) via the scratchpad harness (`shoot-revamp.cjs`, extended with signed-out surfaces, mobile viewports, a sidebar-click check, and a seeded-IndexedDB migration-prompt scenario).
+
+**User tweaks:**
+- **Account page sidebar** (the "sidebar settings shell" previously deferred): a sticky left nav with the six section entries; click scrolls to the panel (smooth, inside the page's own scroll container), the active entry tracks scroll via IntersectionObserver (danger entry highlights error-tinted), hidden ≤900px where the single column stands alone. Layout: `account-shell` (62rem) → `account-body` = nav (13rem, sticky) + `account-main` (46rem).
+- **"Back to editor" enlarged** (default Button size, was `small`) on `/account` + `/files`.
+
+**Round B:**
+- **`NotFound.vue`** — last wordmark holdout fixed (icon + HTML text). Also dropped its `prefers-color-scheme` duplicate block: the colour-mode store stamps `html.dark` pre-render on every route, and an OS fallback would override an explicit in-app light choice.
+- **`CloudMigrationPrompt`** — copy polish (names the feature count; "nothing is moved or deleted"; upload icon on the CTA). **And a real bug found by the audit: the prompt could never fire on login.** It was hosted inside `FileToolbar`, but toolbars mount only while their menu tab is selected and the default tab is **Draw** (MapView briefly sets File, then AppMenu's app-ready watch switches to Draw, unmounting it). **Moved to `MapView`** (`v-if="isCloudMode && appReadyState.isAppReady"` — app-ready also guarantees `fileService` is assigned and passed on that re-render). Screenshot-proven firing from the Draw tab. *This re-opens Phase 3c's "prompt appears on login" verification — retest against real Supabase.*
+- **`privacy.html` / `terms.html`** — checked, no changes: already the full design language (Funnel Sans/JetBrains Mono, grid, accent), correct icon+text brand, consistent footers; `prefers-color-scheme` is right for static pages outside the app toggle.
+- **Dark + responsive audit** — swept landing/login/account/files/chrome/404 in dark + 390px. One fix: the **landing nav overflowed at 390px** ("Sign in" wrapped, CTA past the right edge) → tightened gaps + nowrap ≤640px, icon-only brand ≤480px. Everything else held (files table drops the date column, account sidebar hides, login card scales).
+
+**Not yet verified (needs the user, real account):** the migration prompt end-to-end (Phase 3c retest — appears on login *without* touching the File tab, Save round-trip, Not now, no-prompt cases); sidebar feel on a real session; plus the standing real-account backlog and the `0002` re-apply from 2026-07-05.
+
+### Where to resume
+- **Gather the user's `/login` cosmetic notes** (still uncaptured — the last open Round B item), fix, then the pre-Phase-6 loose ends: user's real-account verification backlog, per-file size limit (user's large-file testing), legal content finalisation. Then **Phase 6** (production provisioning gate, ADR-014).
+
+---
+
+## 2026-07-05 — Round A done: account-page round-2 critiques captured & implemented, Security + Billing panels, toolbar Open button, name-length limit
+
+The user supplied the previously-uncaptured round-2 critiques and they're all built (app repo, `cloud-epic` working tree). Build clean (~1s, code-split held — AccountView ~15.5 kB async chunk, SDK out of main). Verified light + dark via a **recreated fake-session Playwright harness** (`shoot-revamp.cjs`, scratchpad, session-local — same pattern as 2026-07-04: injected unexpired session + route-mocked REST; `user_files` mock honours `limit=1`).
+
+**Account page (`AccountView.vue`):**
+- **"Back to editor" moved to the top** (top-left, above the brand header; footer removed) — bottom placement was easily missed on a long page. Same on `/files`. (`/login` has no such link — it's short and pre-editor; left as is.)
+- **Panels restyled to the export/style-dialog idiom:** compact headers (`0.5rem 1.25rem`), **secondary-coloured** 0.875rem header icons (was primary), 0.875rem titles, inter-panel gap 1.1 → 1.75rem. Danger zone keeps its error tint. Same treatment applied to the `/files` panel.
+- **New Security panel** (after Profile; the deferred /login-chunk item): email-provider accounts get inline new/confirm password fields → `updatePassword` (no current password needed — the session authorises), plus a "send a reset link" alternative reusing the /login forgot→reset flow; Google-only accounts (detected via `app_metadata.providers`) get an explanatory note instead.
+- **New Billing panel** (after Plan & usage): placeholder — disabled "Manage billing" button + "None on file / No invoices yet" details. **Confirmed relevant with Stripe** (user asked): ADR-022's Checkout + **Customer Portal** means Stripe hosts the billing-history/payment-method UI, so this panel stays a thin portal entry point even once live.
+
+**Chrome:**
+- **File toolbar: cloud files button moved between New and Import and renamed "My Files" → "Open"** (desktop-app convention). Tooltip now "Open a file from your cloud files". The AccountMenu overlay item keeps the "My Files" label (it names the page).
+- **`/files`: "New File" button removed** from the panel header (New lives on the File toolbar; `startNewFile` handler dropped).
+- **ActiveFileChip + AccountMenu avatar hover normalised:** pill radius (999px) → 6px, hover = neutral `--p-content-hover-background` wash (was primary-blue border + blue-tinted bg — flagged as non-standard). Avatar image itself stays circular.
+
+**File name length limit — didn't exist; added.** DB column was unconstrained `text`; no input bounded it. Now: `MAX_FILE_NAME_LENGTH = 100` (`file-constants.js`) — `maxlength` on both rename inputs (chip + /files), clamp in the active-file store (`clampName` — the single choke point for create/rename), and an **idempotent CHECK constraint amended into `0002_multi_file.sql`** (cloud repo, per the ADR-023 pre-prod amendment policy). **User: re-apply `0002` to non-prod** (drop-then-add pair; safe to re-run).
+
+**Pre-existing bug found & fixed:** `#app` is a fixed `100vh` flex column and `#main` gets `flex: 1`, so a routed page taller than the viewport **overflows its own root box — the grid background stopped at the first viewport** on the (now longer) account page. Scoped fix on `/account` + `/files` (global layout untouched): the page root becomes its own scroll container (`height: 100vh; overflow-y: auto`) with `background-attachment: local` so the grid paints the full scroll height. Note: page screenshots now need a tall viewport, not `fullPage` (the scroll is inside the page root).
+
+**Not yet verified (needs the user, real account on staging/local):** password change round-trip (incl. wrong-length/mismatch errors) + the reset-link path from /account; Google-account variant shows the note (harness only faked an email account); the whole pre-existing real-account backlog from 2026-07-04 still stands; and **re-apply `0002`** before rename-length testing.
+
+### Where to resume — Round B (final alignment pass)
+- Gather the user's `/login` cosmetic notes (still uncaptured), then: `NotFound.vue` wordmark fix (last holdout), `CloudMigrationPrompt.vue` polish, `privacy.html`/`terms.html` styling check, cross-surface dark + responsive audit, docs sync.
+
+---
+
 ## 2026-07-04 — Session paused for handoff: 4 of 6 revamp chunks done, two rounds remain
 
 The UI/UX revamp (rollout near-term step 3) is being handed to a **fresh session**. This entry is the resume point; the four dated entries below have the per-chunk detail.

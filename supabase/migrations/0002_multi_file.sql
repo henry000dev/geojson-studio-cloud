@@ -24,6 +24,18 @@ drop index if exists public.user_files_one_per_user_uq;
 -- ============================================================================
 alter table public.user_files add column if not exists name text;
 
+-- ============================================================================
+-- 3. Bound the file name (UI/UX revamp; pre-prod amendment per ADR-023).
+--    Mirrors the client's MAX_FILE_NAME_LENGTH (app repo, file-constants.js):
+--    the rename inputs carry maxlength and the active-file store clamps, but the
+--    unconstrained `text` column shouldn't rely on the client alone. The
+--    drop-then-add pair keeps this script re-runnable.
+-- ============================================================================
+alter table public.user_files drop constraint if exists user_files_name_length_ck;
+alter table public.user_files
+  add constraint user_files_name_length_ck
+  check (name is null or char_length(name) <= 100);
+
 -- Nothing else changes: `geojson`, `created_at`, `updated_at`, the `updated_at`
 -- trigger, and the owner-only RLS policies from 0001 already cover multiple rows
 -- per user (every policy is scoped to `auth.uid() = user_id`).

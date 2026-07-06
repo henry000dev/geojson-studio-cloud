@@ -22,6 +22,7 @@
 - **Crash-recovery journal (Level 2)** — beyond v1's Level 1 (retry + reconnect flush + save-status + `beforeunload`; ADR-025), persist the pending unsaved cloud state to a small IndexedDB buffer keyed by file id, cleared on each successful save; on the next load, detect an orphaned buffer and offer "Recover unsaved changes?" Covers the "tab closed while offline" case. This is a **deliberate, scoped exception to ADR-004** (one-way, self-clearing recovery journal — *not* a sync path). Build only if users actually report lost work.
 
 ## Auth / sessions
+- **Configure the extra OAuth providers in Supabase (user task)** — the /login page renders **GitHub / Microsoft (azure) / Facebook** buttons alongside Google (2026-07-06; `constants/auth-constants.js`), but only Google is configured on non-prod. Each needs its OAuth app (GitHub OAuth app, Azure app registration, Facebook app) + the Supabase callback URL + dashboard enablement — on non-prod now, and again on the production project at the Phase 6 gate. Until then the buttons error cleanly ("provider is not enabled").
 - **Unify the two JWTs** — the existing Turnstile session JWT (for the conversion API) and the Supabase user JWT are independent. Could be unified later so logged-in users skip the Turnstile gate on the conversion API. Not needed for v1.
 
 ## Compliance / ops
