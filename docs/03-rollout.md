@@ -77,11 +77,12 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 - **Risk:** medium — the largest new UI surface plus the provider/race work; a standard dialog + state otherwise.
 
 > **Phases 4–8 revamped (2026-07-01)** when the epic's scope expanded from "cloud storage behind a flag" to a **freemium SaaS** (ADR-019). The old Phase 4 (beta) / Phase 5 (Stripe) are now Phase 6 / Phase 8, with production+server, account area, and the landing inserted. Payments stay **last** (ADR-007).
+> **Re-sequenced again (2026-07-06, [ADR-030](02-decisions.md#adr-030--monetisation-built-before-beta-charging-still-goes-live-last)):** the monetisation *build* moved ahead of beta so beta exercises a production-like system, quotas included — old Phase 8 → **Phase 6**, old Phase 6 (beta) → **Phase 8**, old Phase 7's Stage 2 folded into a new **Phase 9 — Go-live** (Stage 1, the preview landing, was already delivered in the UI/UX revamp). *Charging* real users still comes last.
 
 ## Phase 4 — Node server layer (on non-prod)
 
-- **Goal:** add the server-side layer the paid product needs — built and tested entirely against the **existing non-prod** Supabase project. **No production project yet** (that's deferred to the Phase 6 beta gate — ADR-014).
-- **Why no prod here:** nothing in Phases 4–5, and even Stripe development in Phase 8, requires the production project. The Node layer only needs *a* Supabase project with a `service_role` key — non-prod already has one. Provisioning prod now would just create a production footprint to maintain long before any real user touches it. See [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first).
+- **Goal:** add the server-side layer the paid product needs — built and tested entirely against the **existing non-prod** Supabase project. **No production project yet** (that's deferred to the beta gate — now Phase 8, ADR-014).
+- **Why no prod here:** nothing in Phases 4–5, and not even the Stripe build (now Phase 6 — ADR-030), requires the production project. The Node layer only needs *a* Supabase project with a `service_role` key — non-prod already has one. Provisioning prod now would just create a production footprint to maintain long before any real user touches it. See [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first).
 - **Work** (design captured in [ADR-026](02-decisions.md#adr-026--server-side-supabase-integration-jwt-verification-getuser-service_role-admin-client-account-deletion); all wired to **non-prod**):
   - Add `@supabase/supabase-js` to `geojson-studio-api`; build a **verify client** (publishable key) + a **`service_role` admin client** from injected config (`services/supabaseClients.js`).
   - **`createSupabaseAuth` middleware** (mirrors `createSessionAuth`): verifies the caller's Supabase JWT via **`supabase.auth.getUser`**, attaches `req.supabaseUser`, else `401`. Reusable by the Phase 5 account area.
@@ -102,7 +103,7 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 ### Slice 5b — My Account page (usage · export · delete)
 
 - `supabase/migrations/0003_storage_usage_view.sql`: `public.user_storage_usage` (`security_invoker = on`; `sum(octet_length(geojson::text))` + `count(*)`; `grant select` to `authenticated`, revoke `anon`). Applied to non-prod by the user.
-- `/account` route → lazy, code-split `AccountView.vue`; a guard redirects non-flag / logged-out visitors to `/`; navigation propagates `?ff=cloud`; an **Account** entry is added to the `AccountMenu` overlay. Shows **email** (auth store), **storage used** (client-direct read of the view), **Export my data** (client-direct fetch of `user_files` + `user_settings` → one downloadable JSON bundle), and **Delete account** (calls the Phase 4 `POST /api/v1/account/delete` with the Supabase bearer token → sign out → anonymous `/`). A **"Manage billing"** link is a Phase 8 stub.
+- `/account` route → lazy, code-split `AccountView.vue`; a guard redirects non-flag / logged-out visitors to `/`; navigation propagates `?ff=cloud`; an **Account** entry is added to the `AccountMenu` overlay. Shows **email** (auth store), **storage used** (client-direct read of the view), **Export my data** (client-direct fetch of `user_files` + `user_settings` → one downloadable JSON bundle), and **Delete account** (calls the Phase 4 `POST /api/v1/account/delete` with the Supabase bearer token → sign out → anonymous `/`). A **"Manage billing"** link is a stub until the monetisation build (now Phase 6 — ADR-030).
 - **Validation:** a logged-in dev sees their email + a correct storage figure; export downloads a complete bundle; delete removes the account (cascade confirmed) and drops to the anonymous path; a second account sees only its own usage/export (RLS on the view); flag-off unaffected. `ACCOUNT_API_ENABLED` must be on for delete.
 
 ### Slice 5c — terms acceptance
@@ -114,44 +115,64 @@ Each phase below is **independently deployable**. The anonymous path keeps worki
 - **Validation (phase):** a user can read usage, export their data, delete their account (cascade verified), and must accept terms to sign up; privacy + terms pages published. Two-account RLS holds on the usage view + profile table.
 - **Risk:** low–medium — mostly app-repo UI plus two small read-oriented migrations; the only privileged op (delete) already exists and is tested.
 
-> **Near-term re-sequencing (2026-07-03).** With Phases 0–5 done and verified on non-prod (laptop only), the immediate focus is **validating + polishing the cloud experience on a real deployed environment** before the Phase 6 production gate. The `cloud-epic` branch is deployed to **`staging.geojsonstudio.com`** ([ADR-028](02-decisions.md#adr-028--deploy-the-cloud-epic-branch-to-staging-option-2) — Option 2: `cloud-epic` → staging; `main` → production unchanged). Order of work:
+> **Near-term re-sequencing (2026-07-03).** With Phases 0–5 done and verified on non-prod (laptop only), the immediate focus is **validating + polishing the cloud experience on a real deployed environment** before the production gate (beta — now Phase 8, ADR-030). The `cloud-epic` branch is deployed to **`staging.geojsonstudio.com`** ([ADR-028](02-decisions.md#adr-028--deploy-the-cloud-epic-branch-to-staging-option-2) — Option 2: `cloud-epic` → staging; `main` → production unchanged). Order of work:
 > 1. **Reconfigure branches/deploys** — repoint staging to `cloud-epic` (both repos); wire the existing **non-prod** Supabase into the staging build (build-args + backend env) and add the staging origin to the non-prod Supabase Auth URLs. No new Supabase project; production untouched.
 > 2. **Verify on staging** — cloud-epic is live at `staging.geojsonstudio.com`; `?ff=cloud` reveals **and exercises** the account flow end-to-end on a real domain (Google OAuth + email confirmation).
-> 3. **UI/UX revamp** — polish every new cloud surface (LoginDialog, AccountMenu, AccountView, the `privacy.html`/`terms.html` pages, CloudMigrationPrompt, MyFilesDialog) to production quality; testable on staging. **Pulls the landing (Phase 7 Stage 1 — the dark client-rendered preview) forward** here, since it needs no infra. ***Complete (2026-07-06).*** *All chunks + both polish rounds done: landing, `/login` (now a split two-column page with a 4-provider OAuth grid), in-app chrome, `/files`, the account page (sectioned panels + section sidebar + Security/Billing panels), CloudMigrationPrompt (polished + re-hosted in MapView — a latent never-fires-on-login bug), NotFound wordmark, dark/responsive audit. LoginDialog + MyFilesDialog are dedicated pages ([ADR-029](02-decisions.md#adr-029--cloud-account-surfaces-are-routes-not-dialogs)). Code-verified only via the fake-session harness — the **user's real-account verification pass is the outstanding gate** (list consolidated in [`05-worklog.md`](05-worklog.md)).*
+> 3. **UI/UX revamp** — polish every new cloud surface (LoginDialog, AccountMenu, AccountView, the `privacy.html`/`terms.html` pages, CloudMigrationPrompt, MyFilesDialog) to production quality; testable on staging. **Pulls the landing (ADR-024 Stage 1 — the dark client-rendered preview) forward** here, since it needs no infra. ***Complete (2026-07-06).*** *All chunks + both polish rounds done: landing, `/login` (now a split two-column page with a 4-provider OAuth grid), in-app chrome, `/files`, the account page (sectioned panels + section sidebar + Security/Billing panels), CloudMigrationPrompt (polished + re-hosted in MapView — a latent never-fires-on-login bug), NotFound wordmark, dark/responsive audit. LoginDialog + MyFilesDialog are dedicated pages ([ADR-029](02-decisions.md#adr-029--cloud-account-surfaces-are-routes-not-dialogs)). Code-verified only via the fake-session harness — the **user's real-account verification pass is the outstanding gate** (list consolidated in [`05-worklog.md`](05-worklog.md)).*
 > 4. **Bugs & loose ends** — the user's real-account verification backlog (incl. the migration-prompt retest + re-apply `0002`), OAuth provider config in Supabase (GitHub/Microsoft/Facebook), per-file size limit + large-file testing, legal-page content, storage-quota constraints, and the smaller backlog items.
-> 5. **Final polish**, then **Phase 6** (production provisioning + beta) — **kept deferred** until the experience is polished and the user signs off.
+> 5. **Final polish**, then the production gate — **kept deferred** until the experience is polished and the user signs off. *Re-sequenced (2026-07-06, ADR-030): steps 4–5 now live in **Phase 7**, after the **Phase 6** monetisation build; production provisioning gates **Phase 8** (beta).*
 
-## Phase 6 — Free beta / early access
+## Phase 6 — Monetise: Stripe + entitlements (build, test mode)
 
-- **Goal:** real-world validation at zero monetary risk (the original Phase 4 goal). **This is the production gate** — the first point real external users arrive, and the user's explicit "non-prod is good enough" sign-off.
+> Moved ahead of beta by [ADR-030](02-decisions.md#adr-030--monetisation-built-before-beta-charging-still-goes-live-last) (was Phase 8): the entitlements layer changes the core write path, so beta should exercise it rather than have it retrofitted afterwards. *Charging* real users still comes last (the Phase 9 cutover).
+
+- **Goal:** build the full paid-plans layer ([ADR-022](02-decisions.md#adr-022--monetisation-mechanics-user_plans-storage-quota-via-postgres-trigger-stripe); ADR-007 as amended by ADR-030) — entirely in **Stripe test mode** against **non-prod**. No live keys, no production project, no real charges.
 - **Work:**
-  - **Provision the production stack** (moved here from Phase 4 — the deferred [ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first) unblock): create the **production Supabase project**; apply the migrations; wire `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` per environment (mirror the Mapbox token). First production cloud footprint — secrets/isolation must be right. *(Done only once the user is happy with non-prod.)*
-  - Cohort mechanism — an **allowlist** (a flag on `user_plans` / a beta table, or a server-side email allowlist) is the conventional step now that auth exists.
-  - The allowlist gates who gets in; **no payments yet.** Gather usage, fix issues, harden RLS.
-- **Validation:** a flag-on account round-trips against the **prod** project; beta users complete the full account journey without data or security problems.
+  - `public.user_plans` (+ optional `plans`); the **storage-quota Postgres trigger**. Tier limits/prices are **provisional** — final numbers wait for beta usage data (Phase 9).
+  - Node routes: **Checkout**, **webhook** (raw-body signature → writes `user_plans`), **billing-portal**.
+  - Client: upgrade CTA, usage bar (replacing the placeholder `QUOTA_BYTES`), plan state read from `user_plans`; the account page's Billing panel wired to the Customer Portal.
+  - Create the **Stripe account** (activation/KYC deferred to Phase 8 — only needed for live keys).
+- **Development flow:** Stripe test keys + the Stripe CLI forwarding webhooks to the local Node (writing to non-prod `user_plans`); Stripe **test clocks** simulate renewals, payment failures, and cancellations without waiting a billing cycle.
+- **Validation:** full subscription lifecycle (subscribe, cancel, fail-to-pay, downgrade-over-limit) reflected correctly in `user_plans` + quota enforcement (test mode), exercised on staging as well as locally.
+- **Risk:** medium (money + lifecycle edge cases), but isolated — no live money and no production footprint yet.
+
+## Phase 7 — Final polish & debugging (pre-beta gate)
+
+- **Goal:** everything a real external user will touch works, verified with **real accounts** — the consolidated gate before production. (Absorbs steps 4–5 of the near-term note above.)
+- **Work:**
+  - The user's **real-account verification backlog** (consolidated list in [`05-worklog.md`](05-worklog.md): migration prompt retest + `0002` re-apply, `/login` flows + OAuth round-trips, `/account`, `/files`, landing/routing, chrome) — plus the new Phase 6 payment surfaces (upgrade CTA, usage bar, portal round-trip in test mode).
+  - The loose ends: OAuth provider config in Supabase (GitHub/Microsoft/Facebook), per-file size limit (user's large-file testing → pick the ceiling), legal-page content finalisation, storage-quota constraints.
+  - Fix whatever falls out; final UI/UX pass.
+- **Validation:** the user signs off that staging (non-prod, test mode) is beta-ready.
+- **Risk:** low — polish and verification; no new architecture.
+
+## Phase 8 — Free beta / early access
+
+> Was Phase 6; renumbered by ADR-030. **This is the production gate** — the first point real external users arrive, and the user's explicit "non-prod is good enough" sign-off ([ADR-014](02-decisions.md#adr-014--separate-supabase-projects-per-environment-non-prod-set-up-first)).
+
+- **Goal:** real-world validation at zero monetary risk — now of the production-like system, quotas included.
+- **Work:**
+  - **Provision the production stack** (the deferred ADR-014 unblock): create the **production Supabase project**; apply the migrations; wire `VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` per environment (mirror the Mapbox token); per-provider OAuth callbacks + the Auth redirect allow-list. First production cloud footprint — secrets/isolation must be right. *(Done only once the user is happy with non-prod.)*
+  - **Cohort = plan rows:** beta users get a free **`beta` plan** in `user_plans` (the allowlist and the plan mechanism are the same thing — supersedes the earlier separate-allowlist idea). Quotas are **live**, so behaviour is production-like.
+  - **No real charges.** Optionally let beta users exercise the real (live-mode) Checkout via a **100%-off "founders" coupon**.
+  - **Start Stripe account activation** (business details / KYC / bank — days, country-dependent) so live keys never block the Phase 9 cutover.
+  - Gather usage (informs the final tier limits/prices), fix issues, harden RLS.
+- **Validation:** beta users complete the full account journey against the **prod** project without data or security problems; quota behaviour is correct on real usage.
 - **Risk:** medium — first production footprint (secrets/isolation) on top of whatever beta surfaces.
 
-## Phase 7 — Landing & go-public
+## Phase 9 — Go-live
 
-- **Goal:** the public front door + the free-vs-paid framing ([ADR-021](02-decisions.md#adr-021--app-entry-topology-static-landing-at--app-at-app)), delivered in **two stages** ([ADR-024](02-decisions.md#adr-024--entry-topology-in-two-stages-client-rendered-preview-then-static-seo-landing)).
-- **Stage 1 — dark preview (behind the flag, can land earlier):** one SPA at root; a flag-gated `/` route renders a **temporary client-rendered `Landing` component**, `/app` renders the editor; `?ff=cloud` propagates through navigation. **No infra change** (nginx SPA fallback already resolves `/app`); no SEO yet (nothing crawls the dark flag). Lets the whole topology be previewed like any other slice.
-- **Stage 2 — launch:**
-  - Hand-written **static SEO landing** at `/` (features, pricing, free-tier entry, sign-up); app relocated to **`/app`** (Vite base + router base + nginx + Supabase redirect config); **delete the temporary `Landing` component**.
-  - **Retire the `?ff=cloud` flag** — cloud becomes unconditional; delete the scaffolding.
-- **Validation:** Stage 1 — flag-on shows the preview landing at `/`, `/app` runs the editor, bare `/` is unchanged. Stage 2 — bare domain serves the **crawlable static** landing; free-tier entry → anonymous `/app`; sign-up → cloud; no dark-flag paths remain.
-- **Risk:** medium — entry-topology + auth-redirect changes; mostly config + a static page. Stage 1 is near-zero risk (client routing only).
+> Absorbs the old Phase 7 "Landing & go-public" **Stage 2** ([ADR-021](02-decisions.md#adr-021--app-entry-topology-static-landing-at--app-at-app)/[ADR-024](02-decisions.md#adr-024--entry-topology-in-two-stages-client-rendered-preview-then-static-seo-landing) — Stage 1, the client-rendered preview landing, was delivered in the UI/UX revamp) plus the payments cutover (ADR-030).
 
-## Phase 8 — Monetise: Stripe + entitlements
-
-- **Goal:** introduce paid plans (ADR-007 / [ADR-022](02-decisions.md#adr-022--monetisation-mechanics-user_plans-storage-quota-via-postgres-trigger-stripe)) — payments **last**, on a proven stack.
+- **Goal:** the public front door + real payments, on the stack beta proved.
 - **Work:**
-  - `public.user_plans` (+ optional `plans`); the **storage-quota Postgres trigger**.
-  - Node routes: **Checkout**, **webhook** (raw-body signature → writes `user_plans`), **billing-portal**.
-  - Client: upgrade CTA, usage bar, plan state read from `user_plans`.
-  - Grandfather / convert beta users.
-- **Development is in Stripe *test mode* against non-prod:** the whole Checkout + webhook + portal flow is built and exercised with Stripe test keys and the Stripe CLI forwarding webhooks to the local Node (writing to non-prod `user_plans`) — no production project or live keys needed until the launch cutover.
-- **Validation:** full subscription lifecycle (subscribe, cancel, fail-to-pay, downgrade-over-limit) reflected correctly in `user_plans` + quota (test mode); live keys wired only at launch.
-- **Risk:** medium (money + lifecycle edge cases), but on a battle-tested stack.
+  - Hand-written **static SEO landing** at `/` (features, **pricing**, free-tier entry, sign-up); app relocated to **`/app`** (Vite base + router base + nginx + Supabase redirect config); **delete the temporary `Landing` component**.
+  - **Retire the `?ff=cloud` flag** — cloud becomes unconditional; delete the scaffolding. Plus ADR-028's launch cleanup: merge `cloud-epic` → `main`, re-point the staging deploy.
+  - **Payments cutover:** wire **live Stripe keys** (account activated during Phase 8); set the **final tiers/prices** from beta usage data; decide tax handling (e.g. Stripe Tax) before the first live charge.
+  - **Beta users:** keep the free `beta` plan or convert (e.g. the founders coupon) — the grandfather decision, now just a plan-row update.
+  - Reconcile `about.html`'s privacy section (backlog item).
+- **Validation:** bare domain serves the **crawlable static** landing; free-tier entry → anonymous `/app`; sign-up → cloud; one real subscription end-to-end (subscribe → webhook → plan + quota updated); no dark-flag paths remain.
+- **Risk:** medium — entry-topology + auth-redirect changes and the first live money, but every piece was proven in earlier phases.
 
 ---
 

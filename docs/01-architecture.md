@@ -69,7 +69,7 @@ public.user_settings
   value         jsonb
   -- one row per (user_id, key); templates, bookmarks, prefs
 
--- Later, for payments (Phase 8 / ADR-022) — server-authoritative (webhook writes,
+-- Later, for payments (Phase 6 — ADR-022/ADR-030) — server-authoritative (webhook writes,
 -- client reads own row; never client-writable):
 public.user_plans
   user_id                uuid primary key references auth.users(id)

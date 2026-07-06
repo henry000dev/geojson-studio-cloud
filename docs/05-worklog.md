@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-07-06 — Phases re-sequenced (ADR-030): monetisation build moved before beta; tail is now Phases 6–9
+
+Planning session on the remaining phases. The user proposed bringing Stripe forward so beta tests an almost production-like system; analysis agreed: the entitlements/quota layer (ADR-022) changes the core write path, so retrofitting it *after* beta would invalidate part of what beta proved and need its own testing round; Stripe **test mode + test clocks** make the full subscription lifecycle testable pre-beta; grandfathering reduces to a plan row. Key reframing: what moves forward is the **build** (test mode) — **charging real users still comes last**, so ADR-007's rationale ("no one pays while the foundation is unproven") is intact.
+
+**New sequence** (recorded as **ADR-030**; rollout Phases 6–9 rewritten):
+- **Phase 6 — Monetise (build, test mode):** `user_plans` + storage-quota trigger, Node Checkout/webhook/portal routes, upgrade CTA + usage bar (replaces the placeholder `QUOTA_BYTES`), Billing panel wired to the Customer Portal — all non-prod, provisional tiers; Stripe account created (activation deferred).
+- **Phase 7 — Final polish & debugging:** the consolidated pre-beta gate — the real-account verification backlog (see the handoff entry below) + loose ends (OAuth provider config, per-file size limit, legal content, storage-quota constraints) + the new payment surfaces.
+- **Phase 8 — Free beta / early access** (was Phase 6): still the **production-provisioning gate** (ADR-014). Beta users = free `beta` plan rows (the allowlist *is* the plan mechanism); quotas live; no charges (optional live-mode 100%-off founders coupon); Stripe **activation (KYC/bank)** runs here.
+- **Phase 9 — Go-live:** absorbs old Phase 7 **Stage 2** (static SEO landing, `/app` move, `?ff=cloud` retirement, ADR-028 launch cleanup) + the payments cutover: live Stripe keys, final tiers/prices from beta usage data, tax-handling decision.
+
+**Docs touched:** new **ADR-030**; ADR-007 status annotated (sequencing amended, rationale intact); rollout Phases 6–9 rewritten + both re-sequencing notes updated; stale phase numbers fixed in ADRs 014/022/024/026/027/028/029, the overview (status, goals, glossary 0–9), architecture §5 comment, and the backlog.
+
+### Where to resume
+- Dev work starts **Phase 6**: design the `user_plans`/`plans` migration + quota trigger (ADR-022 shapes), then the Node Stripe routes (test keys, Stripe CLI webhook forwarding).
+- The user's **real-account verification backlog** (handoff entry below) is unchanged and can proceed in parallel — it now lands in **Phase 7** rather than blocking Phase 6.
+
+---
+
 ## 2026-07-06 — Session paused for handoff: UI/UX revamp COMPLETE; next is the user's real-account verification pass
 
 **The revamp (rollout near-term step 3) is finished and the user approved the final /login split layout ("I like this version much better").** This entry is the fresh-session resume point; the dated entries below (2026-07-04 → 2026-07-06 evening) hold the per-chunk detail. Build clean throughout; everything below was verified **only** via the session-local fake-session Playwright harness (mocked REST, light+dark+mobile) — **nothing new has been checked against real Supabase.**

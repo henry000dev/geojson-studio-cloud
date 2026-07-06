@@ -4,8 +4,8 @@
 
 ---
 
-## Payments (mechanics settled in ADR-007/020/022; the *commercial* shape is the user's)
-- **Plan model and pricing** — the concrete **tiers, prices, and per-plan storage limits**. Settled: **free = local, paid = cloud** (ADR-019); pricing is **storage-based** (ADR-022). The actual numbers are the user's to design.
+## Payments (mechanics settled in ADR-007/020/022; sequencing in ADR-030 — built in Phase 6 test mode, live at Phase 9; the *commercial* shape is the user's)
+- **Plan model and pricing** — the concrete **tiers, prices, and per-plan storage limits**. Settled: **free = local, paid = cloud** (ADR-019); pricing is **storage-based** (ADR-022). The actual numbers are the user's to design — **provisional in the Phase 6 build; finalised at Phase 9 go-live using beta usage data** (ADR-030).
 - **Entitlement enforcement is decided** (ADR-022): a **Postgres trigger** on `user_files` enforces the per-plan storage quota; `public.user_plans` (+ optional `plans` lookup) holds plan state, written only by the Node webhook. TBD is the limit values and any non-storage entitlements (e.g. premium tools).
 - **Lifecycle edge cases** — failed payments, cancellation (what happens to a paid user's cloud files), and **downgrade-over-limit** (decided rule: block growth, allow shrink — implementation TBD).
 
@@ -22,16 +22,16 @@
 - **Crash-recovery journal (Level 2)** — beyond v1's Level 1 (retry + reconnect flush + save-status + `beforeunload`; ADR-025), persist the pending unsaved cloud state to a small IndexedDB buffer keyed by file id, cleared on each successful save; on the next load, detect an orphaned buffer and offer "Recover unsaved changes?" Covers the "tab closed while offline" case. This is a **deliberate, scoped exception to ADR-004** (one-way, self-clearing recovery journal — *not* a sync path). Build only if users actually report lost work.
 
 ## Auth / sessions
-- **Configure the extra OAuth providers in Supabase (user task)** — the /login page renders **GitHub / Microsoft (azure) / Facebook** buttons alongside Google (2026-07-06; `constants/auth-constants.js`), but only Google is configured on non-prod. Each needs its OAuth app (GitHub OAuth app, Azure app registration, Facebook app) + the Supabase callback URL + dashboard enablement — on non-prod now, and again on the production project at the Phase 6 gate. Until then the buttons error cleanly ("provider is not enabled").
+- **Configure the extra OAuth providers in Supabase (user task)** — the /login page renders **GitHub / Microsoft (azure) / Facebook** buttons alongside Google (2026-07-06; `constants/auth-constants.js`), but only Google is configured on non-prod. Each needs its OAuth app (GitHub OAuth app, Azure app registration, Facebook app) + the Supabase callback URL + dashboard enablement — on non-prod now, and again on the production project at the beta gate (Phase 8 — ADR-030 renumbering). Until then the buttons error cleanly ("provider is not enabled").
 - **Unify the two JWTs** — the existing Turnstile session JWT (for the conversion API) and the Supabase user JWT are independent. Could be unified later so logged-in users skip the Turnstile gate on the conversion API. Not needed for v1.
 
 ## Compliance / ops
 - **Privacy policy + terms of service** — the *pages + signup acceptance* are **Phase 5** ([ADR-027](02-decisions.md#adr-027--phase-5-account-area--compliance): static `privacy.html`/`terms.html` + a required signup checkbox, recorded in `user_profiles` on first login). The legal **content** is the user's to finalise — the drafted pages are a starting point.
 - **Terms re-acceptance on version bump** — v1 records `terms_version` at first login only; it does **not** re-prompt when the current version changes. Add a re-acceptance gate if terms are revised after launch.
-- **Reconcile `about.html` privacy section at go-public** — `public/about.html` §04 ("Privacy & data") states "no server/cloud storage", true only for the anonymous free tier. Update it (or split free-vs-cloud) at Phase 7 launch, when cloud stops being dark.
+- **Reconcile `about.html` privacy section at go-public** — `public/about.html` §04 ("Privacy & data") states "no server/cloud storage", true only for the anonymous free tier. Update it (or split free-vs-cloud) at the Phase 9 go-live, when cloud stops being dark.
 - **Account deletion + data export** — deletion is **done** (Phase 4: Node `service_role` → cascade via the `on delete cascade` FKs); **data export** is **Phase 5** (client-direct bundle — ADR-027). Export **as a zip of individual `.geojson` files** (v1 exports one JSON bundle) is deferred.
 - **`user_profiles` future fields** — the generic per-user table lands in Phase 5 with only terms columns; display name and other non-preference account fields can be added later without restructuring.
-- **Backup tier** — confirm Supabase backup/retention settings when provisioning the **production** project (the Phase 6 beta gate — ADR-014).
+- **Backup tier** — confirm Supabase backup/retention settings when provisioning the **production** project (the Phase 8 beta gate — ADR-014/ADR-030).
 
 ## Phase 3 follow-ups (deferred UI/UX & cleanup)
 
