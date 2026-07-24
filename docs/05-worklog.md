@@ -4,6 +4,62 @@
 
 ---
 
+## 2026-07-24 — Phase 6 monetisation FULLY VERIFIED in test mode (whole lifecycle green)
+
+After the two 2026-07-23 blockers were fixed (service_role grants re-applied via `0005`; API restarted for the `managed_payments` opt-out), the user ran the **entire** Phase 6 test-mode verification against non-prod — **all green**. Phase 6 is now build-complete **and** verified; what remains is the user's git commit across the three repos, then Phase 7. Two follow-ups surfaced during verification are logged in Phase 7 (below).
+
+**Verified this session (test mode / non-prod):**
+- **Checkout → webhook grant:** Upgrade → Stripe test Checkout (`4242…`) → `customer.subscription.created` webhook → `user_plans` written → account page shows the paid plan. (First proof of the **webhook** leg — checkout URL gen was already provable; the entitlement grant only became testable once a real payment landed.)
+- **Customer Portal:** Manage billing opens the Stripe-hosted portal; the `return_url` round-trips back to `/account?ff=cloud`.
+- **Storage-quota gate (the core-write-path change that justified building Phase 6 pre-beta):** with the plan limit temporarily lowered below usage, a **growing** save is rejected with the `GS_QUOTA_EXCEEDED` → "Storage limit reached … upgrade" message, while a **shrinking/flat** save still succeeds (humane downgrade).
+- **Immediate cancel:** dashboard "cancel immediately" → `customer.subscription.deleted` → row reverts to `early_access` (`status = canceled`, subscription id + period end nulled, customer id retained).
+- **Forged webhook signature:** a bogus `Stripe-Signature` POST to the live local webhook returns **400 `{"error":"Invalid signature"}`** before any handler logic (verified via `curl`).
+- **Test-clock renewal:** subscription created on a Stripe test clock (with `supabase_user_id`/`plan` metadata so `resolveUserId` maps it); advancing past `current_period_end` fired `customer.subscription.updated` and **advanced the stored period end**, plan/`active` intact.
+- **Test-clock dunning:** failing card (`4000…0341`) → repeated `charge.failed` → `status = past_due` with the **paid plan retained** (the `past_due ∈ GRANTING_STATUSES` grace window, working as designed) → retries exhausted → `customer.subscription.deleted` → back to `early_access` (`canceled`).
+
+**Follow-ups found → logged in Phase 7 (`03-rollout.md`):** (1) over-limit save UX should be a **modal dialog, not a toast** (+ consider making the quota error non-retryable); (2) the webhook should **revert on terminal non-granting statuses** (`unpaid`/`incomplete_expired`/`canceled` via `subscription.updated`), so entitlement doesn't depend on the Stripe "manage failed payments" dashboard setting — interim mitigation is setting that to "Cancel subscription."
+
+**Next:** user commits `cloud-epic` on the api + app repos and the `0005`/docs changes here, then Phase 7 (the two follow-ups above + the standing real-account backlog + loose ends).
+
+---
+
+## 2026-07-23 — Phase 6 first live-in-test-mode run: two checkout blockers found + fixed
+
+The user began the test-mode checkout run (Stripe account + test Products/Prices created, `0005` applied, API env filled, `stripe listen` + local API + app all up). Early access + usage bar rendered correctly (6c `getPlan` works). The **Upgrade → checkout** call 500'd. Diagnosed with two throwaway scripts (since removed) reproducing the exact service calls; found **two independent blockers**, both now fixed:
+
+1. **`42501 permission denied for table user_plans`** (hit first, before Stripe). Root cause: on this Supabase project `service_role` did **not** inherit the default `public`-schema table grants, and `BYPASSRLS` does not cover **table-level** privileges — so the Node service_role client's PostgREST reads/writes are denied. This never surfaced before because Phase 4 account deletion uses the **GoTrue Admin API** (no table grant needed), so `getUserPlan`/`upsertUserPlan` are the first service_role **PostgREST** calls in the epic. Confirmed project-wide (every public table 42501 for service_role) while `auth.admin.listUsers` succeeded (key *is* service_role; it just lacks table grants). **Fix:** `0005` now `grant`s `service_role` explicitly — `select` on `plans`, `select,insert,update` on `user_plans`. The Phase 1–5 tables share the latent gap but need no fix (never touched by service_role over PostgREST). → **user must re-run `0005`** (idempotent).
+
+2. **Stripe `Managed Payments … tax code is missing`** (would hit next). New Stripe accounts default **Managed Payments** (merchant-of-record + auto tax) ON, which requires a `tax_code` on every product. **Fix:** `createCheckoutSession` now passes `managed_payments: { enabled: false }` — classic Checkout, no tax code needed; the adopt-or-not decision is deferred to Phase 8/9 (backlog + ADR-031).
+
+After both fixes: a real Stripe **test Checkout URL** is returned end-to-end; API Jest **18 suites / 260 tests** still pass. Also bumped `stripe` **17 → 22.3.2** (latest; `new Stripe()`/methods unchanged, no code impact) and `npm install`ed it. **Docs:** backlog (Managed Payments decision + service_role-grant learning), `migrations/README.md` (service_role grant verify block), this entry.
+
+### Where to resume
+- **User:** re-run `0005` (adds the service_role grants); **restart the API** with `npm run local` (picks up the `managed_payments` change); retry Upgrade → Checkout with test card `4242 4242 4242 4242`; watch `stripe listen` for `[200]`s and confirm `user_plans` flips to the paid tier. Then the rest of the lifecycle (portal, cancel) per the 2026-07-22 resume list.
+
+---
+
+## 2026-07-22 — Phase 6 (monetise) code-complete: plans + quota trigger, Stripe Node routes, client billing UI
+
+Built all three Phase 6 slices in one session; the two design forks were settled with the user and recorded as **ADR-031**. Everything is **Stripe test mode / non-prod**, shipped dark behind flags — charging real users is still Phase 9 (ADR-030). Build green: API Jest **18 suites / 260 tests pass**; app `npm run build` clean (`AccountView` a 20 kB async chunk; Supabase SDK still out of the main bundle). **Pending the user** (see "Where to resume").
+
+**Design decisions (ADR-031, refines ADR-022):**
+- `public.plans` is a real **lookup table** (tier → `limit_bytes` + `label`/`rank`) — limits are data, changed with a row UPDATE.
+- **Every cloud user has a `user_plans` row**, defaulted to a new **`early_access`** plan, created **server-side** by a `handle_new_user` trigger on `auth.users` (+ a one-time backfill) — *not* a client write — so `user_plans` stays strictly server-authoritative (client reads its own row, never writes it).
+
+**Slice 6a — schema + quota (cloud repo).** `supabase/migrations/0005_plans_and_quota.sql`: `plans` (seeded `early_access` 1 GiB / `basic` 250 MiB / `pro` 5 GiB — **provisional**), `user_plans` (owner-read-only RLS — no client write grant/policy), the default-plan trigger + backfill, and `enforce_storage_quota` (BEFORE INSERT/UPDATE on `user_files`: blocks a write that grows the user's total bytes past the plan limit; always allows flat/shrinking writes — humane downgrade; raises a `GS_QUOTA_EXCEEDED` message the client detects). `migrations/README.md` verifying block + **ADR-031** + architecture §5 sketch all updated.
+
+**Slice 6b — Stripe Node routes (api repo, `cloud-epic`).** New `services/stripeClient.js` (lazy `require("stripe")`, injectable for tests), `services/billingService.js` (checkout/portal orchestration + **idempotent** webhook reconciliation + `buildPriceToPlan`), `controllers/billingController.js`, `routes/billingRoute.js`. Extended `services/supabaseClients.js` with service_role `getUserPlan` / `upsertUserPlan` / `findUserIdByCustomerId`. Endpoints under `/api/v1/billing`, gated by `BILLING_API_ENABLED`: **checkout** + **portal** (behind `createSupabaseAuth` + a tight rate limiter), **webhook** (public, Stripe-signed, **raw body**, mounted **before** the `/api` Cloudflare guard — Stripe carries no guard header and the signature is its auth). New config/secrets (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, the `STRIPE_PRICE_{BASIC,PRO}_{MONTHLY,ANNUAL}` map) with fail-fast on the two secrets; `.env.template` + `package.json` (`stripe` dep — **user runs `npm install`**). New suites `billing.test.js`, `stripeClient.test.js`, plus supabaseClients plan-op tests. **Entitlements are granted on the webhook, never on the browser's return.**
+
+**Slice 6c — client billing UI (app repo, `cloud-epic`).** New `services/account/account-billing.js` (`getPlan` = client-direct read of `user_plans ⋈ plans`; `startCheckout` / `openBillingPortal` → the Node endpoints with the Supabase bearer, mirroring `deleteAccount`); `config.api.billingCheckout` / `billingPortal`. `AccountView.vue`: the Plan & usage panel shows the **real plan + real limit** (placeholder `QUOTA_BYTES` removed), with an **Upgrade** block (monthly/annual `SelectButton` + per-tier Checkout; provisional display prices); the Billing panel's **Manage billing** opens the live Customer Portal. Quota UX: a new SDK-free `services/storage/quota-error.js` + `auto-save-service.notifySaveFailed(error)` now shows "Storage limit reached … upgrade" for an over-limit save instead of the generic "browser storage may be full".
+
+### Where to resume — user tasks, then Phase 7 verification
+1. **Stripe (user):** create the account (test mode; KYC/activation is Phase 8), create test-mode Products/Prices (Basic + Pro, monthly + annual), hand the price ids to the API env.
+2. **Non-prod wiring (user):** apply `0005`; set `BILLING_API_ENABLED=true` + the Stripe keys/prices in the API env; `npm install` (adds `stripe`); run `stripe listen --forward-to localhost:8080/api/v1/billing/webhook` for local webhooks; `npm install` + git on both code repos (`cloud-epic`).
+3. **Verify (test mode, real account) — lands in Phase 7:** full lifecycle via Stripe **test clocks** — subscribe → webhook writes `user_plans` → account page reflects plan + usage; upgrade Checkout round-trip; Manage billing → portal; an over-limit save shows the quota toast and shrinking recovers; cancel → reverts to `early_access`. Runs alongside the standing real-account verification backlog.
+4. Then the remaining Phase 7 loose ends (OAuth provider config, per-file size limit, legal content) → **Phase 8** production provisioning + beta.
+
+---
+
 ## 2026-07-06 — Phases re-sequenced (ADR-030): monetisation build moved before beta; tail is now Phases 6–9
 
 Planning session on the remaining phases. The user proposed bringing Stripe forward so beta tests an almost production-like system; analysis agreed: the entitlements/quota layer (ADR-022) changes the core write path, so retrofitting it *after* beta would invalidate part of what beta proved and need its own testing round; Stripe **test mode + test clocks** make the full subscription lifecycle testable pre-beta; grandfathering reduces to a plan row. Key reframing: what moves forward is the **build** (test mode) — **charging real users still comes last**, so ADR-007's rationale ("no one pays while the foundation is unproven") is intact.

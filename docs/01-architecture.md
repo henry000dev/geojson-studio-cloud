@@ -69,15 +69,23 @@ public.user_settings
   value         jsonb
   -- one row per (user_id, key); templates, bookmarks, prefs
 
--- Later, for payments (Phase 6 — ADR-022/ADR-030) — server-authoritative (webhook writes,
--- client reads own row; never client-writable):
+-- Payments (Phase 6 — ADR-022/ADR-030/ADR-031) — server-authoritative (auth-trigger +
+-- webhook write; client reads own row; never client-writable):
+public.plans                            -- tier lookup; limits are DATA (ADR-031)
+  plan                   text primary key -- "early_access" | "basic" | "pro"
+  limit_bytes            bigint           -- per-tier storage quota
+  label, rank                             -- display metadata
+
 public.user_plans
   user_id                uuid primary key references auth.users(id)
-  plan                   text             -- "basic" | "pro" | ...  (free = local, no row)
+  plan                   text default 'early_access' references plans(plan)
   status                 text             -- stripe subscription status
   stripe_customer_id     text
   stripe_subscription_id text
   current_period_end     timestamptz
+  -- Every user has a row: a security-definer trigger on auth.users writes a
+  -- default 'early_access' row on signup (ADR-031), so "free = no row" from
+  -- ADR-022 became "free = a default early_access row". RLS: owner SELECT only.
 ```
 
 > **Phase 2 implementation note (ADR-016, amended by ADR-023).** The active-document table is **`public.user_files`** (renamed from `files` for consistency — ADR-023). The first migration (`supabase/migrations/0001_files_and_user_settings.sql`) refines this sketch: `user_settings.value` is **`text`** (the settings seam round-trips opaque `localStorage` strings, so text is a lossless mirror), `name` is **deferred to Phase 3**, and `user_files` carries a temporary **one-row-per-user** unique index for the Phase 2 single-active-file model (dropped in `0002`). There is **no `backup_geojson` column** — cloud File→New is non-destructive, so the backup/undo machinery is local-only (ADR-018/023).
