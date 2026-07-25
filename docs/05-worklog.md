@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-07-25 — Plan-tier product shape settled (ADR-032) + ops docs
+
+A planning session (no app code shipped) settling the commercial *shape* on top of the built Phase 6 mechanism, plus two operational docs.
+
+**Decisions → [ADR-032](02-decisions.md#adr-032--plan-tiers-differentiated-by-storage-and-file-count-not-features):**
+- **Four tiers** — Guest (anon/local, 1 file) · Free (cloud) · Basic · Pro — differentiated by **storage + file-count only**. Core editing/format-conversion is **never gated** (it's the acquisition funnel — gate scale/persistence, not capability). The differentiator table lives in ADR-032.
+- **Permanent free *cloud* tier** — refines ADR-019's "free = local, paid = cloud": a free sign-in buys durability + multi-device + more files, not the ability to work.
+- **Rename `early_access` → `free`** (slug + label; "freemium" rejected as a tier name — it names the business model).
+- **Per-file size = guardrail, not a lever** (redundant with the total cap; protects editor perf + write cost). Already a Phase 7 loose end.
+- **API usage limits stay a uniform compute guard; per-user metering deferred** — the existing IP rate limiter suffices; a per-plan rate perk needs the two-JWT unification first.
+
+**Biggest catch — new build work:** the **file-count lever is chosen but unbuilt** (the `0005` trigger enforces storage only). Needs `plans.max_files` + a `user_files` insert-count check + client UX → Phase 7. Also queued: fix the inverted storage seed (`basic` 250 MB < free 1 GB), and reconcile `00-overview.md` / ADR-019's "cloud = paid" wording with the permanent free-cloud tier.
+
+**Ops docs created:** the API repo `README.md` gained a *Local Billing & Webhooks (Stripe test mode)* section (env + Stripe CLI + `npm run local` + lifecycle recipe); new cloud-repo **`RUNBOOK.md`** documents plan administration (comp / hidden / unlimited plans via SQL, with caveats).
+
+**Next:** user decides when to implement the file-count lever and the `early_access → free` rename (both Phase 7 / doable pre-prod; user re-runs `0005`). Phase 6 itself stays done + verified (2026-07-24).
+
+---
+
 ## 2026-07-24 — Phase 6 monetisation FULLY VERIFIED in test mode (whole lifecycle green)
 
 After the two 2026-07-23 blockers were fixed (service_role grants re-applied via `0005`; API restarted for the `managed_payments` opt-out), the user ran the **entire** Phase 6 test-mode verification against non-prod — **all green**. Phase 6 is now build-complete **and** verified; what remains is the user's git commit across the three repos, then Phase 7. Two follow-ups surfaced during verification are logged in Phase 7 (below).
