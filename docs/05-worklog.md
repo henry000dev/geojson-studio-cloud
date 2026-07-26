@@ -4,6 +4,62 @@
 
 ---
 
+## 2026-07-26 — Premium-feature axis settled (ADR-034); RUNBOOK moved into docs/
+
+Planning session (no app code). Explored adding paid-plan features beyond storage — share/collaborate, publish publicly, batch operations — and settled the *axis* + *sequencing* (which ride go-live, which become a post-launch phase).
+
+**Decision → [ADR-034](02-decisions.md#adr-034--premium-features-gate-scale-automation-and-distribution-not-capability): premium = scale / automation / distribution / collaboration, never core capability** (extends ADR-032's "gate scale, not capability" from the tier levers to the feature axis). The slate, placed by *architectural risk*:
+- **Phase 7a:** `plans.description` (private admin memo) + seeded hidden plans **`discount`** + **`god_mode`** — rides the existing `0005` re-apply.
+- **Phase 7c (quick wins):** **`save-as`** (ungated core convenience) and **share-as-URL / publish read-only** (unguessable token URL + unpublish; a small Node public-read endpoint serves **raw** geojson so **import-from-URL** can consume it — raw-serve keeps ADR-033's sanitisation tail off; the read endpoint doesn't violate ADR-002's write-path guard). Publish + the existing import-from-URL is the **v1 collaboration story**.
+- **Phase 9 (Premium-v1 slice):** **bulk export** as the first finished premium surface, paired with pricing finalisation. "Partial at launch" = *fewer features, each finished* — not half-built-wide.
+- **New Phase 10 — post-launch premium iteration:** bulk import + the rest of bulk ops, version history, richer publish (discovery + a **rendered** viewer → where ADR-033's output-sanitisation finally lands), shared editing, a developer API token.
+
+**Deferred / declined:** collaborative editing (email-invite ACL / teams / "same-organisation") **deferred**, real-time collab **declined** — cost dominated by the invite-by-email + claim-on-signup flow, the owner-only-RLS → `file_shares` ACL rewrite, and the whole-document-write clobber (pulls in the parked per-feature model); publish + import substitutes. Priority-support SLA + an "early preview" perk **not built** (soft label; AI-drafted replies over one inbox suits a solo maintainer). Clarified the **"early access" collision** — it names the `free` plan (the ADR-032 rename), *not* a perk.
+
+**Hidden plans + Stripe:** comp/free plans = pure SQL (no Stripe); a hidden **paid** plan = a real Stripe Price + Payment Link never listed in the upgrade UI, granted by the existing webhook once the price→plan mapping exists.
+
+**Docs touched:** new **ADR-034**; `03-rollout.md` (7a plans-admin fields, 7c quick wins + a risk-line note on the public-read endpoint, Phase 9 Premium-v1, new Phase 10); `04-backlog.md` premium-feature menu; **`RUNBOOK.md` moved `→ docs/`** and given a *hidden paid plan* section (+ `god_mode`/`discount` examples); this entry.
+
+### Where to resume
+- No new blocker for **7a** — the `description` column + `discount`/`god_mode` seeds fold into its existing `0005` re-apply. **save-as** + **publish** are the 7c quick wins; **bulk export** is the Phase 9 Premium-v1 slice. Everything with "another human sees this file" (shared editing, a rendered public viewer) is Phase 10, by design.
+
+---
+
+## 2026-07-25 — Content-integrity decision (ADR-033): no server-side GeoJSON validation; quota + ToS + reader-robustness
+
+Follow-on from a user question. Because GeoJSON is written **client-direct** to `user_files` (owner-RLS, opaque `jsonb`), a user can replay their own auto-save request (devtools → curl/Postman, own valid token) and store any valid JSON in their **own** row — potentially turning the table into a general-purpose JSON store.
+
+**Analysis:** blast radius is **self-only** (RLS), and `jsonb` already rejects malformed JSON, so the residual is *valid JSON that isn't GeoJSON*. The decisive point: **a GeoJSON validator doesn't stop this** — arbitrary data wraps trivially inside a valid `FeatureCollection` (`geometry: null`, payload under `properties`), passing any structural check. So validation is a speed bump against casual junk, not an anti-abuse control; the real cost bound is the (content-agnostic) **quota**, already built.
+
+**Decision (ADR-033):** no server- or DB-side content validation. Integrity/abuse handled by three controls — **quota** (`0005` trigger + per-file cap + file-count lever = the cost bound), a **ToS acceptable-use clause** (intent; misuse → suspension), and **reader robustness** (the app reads back non-GeoJSON gracefully = integrity). Client-side validation stays a UX guardrail. A shallow DB CHECK was considered and declined (bypassable; only buys a uniform-shape invariant we don't need); the Node-validation path was rejected (reverses ADR-002, fixes nothing the wrapper doesn't defeat). **Revisit trigger:** file sharing / public files / server-side rendering — then *safe rendering / output sanitisation* (not validation) becomes the real control.
+
+**Docs touched:** new **ADR-033**; `03-rollout.md` 7b gains the ToS acceptable-use clause + a graceful-read-back task; `04-backlog.md` compliance note (+ decided-against pointer); this entry. **No phase/scope change** — both land in the existing Phase 7b.
+
+### Where to resume
+- 7b picks up the ToS clause (with the legal content) and the graceful-read-back task; quota is already built. Nothing here blocks 7a.
+
+---
+
+## 2026-07-25 — Phase 7 re-sliced into 7a–7d (verify last); Phase 6 marked done+verified in the plans
+
+Planning session (no app code). Two things: reconciled the plan docs with Phase 6 being **done + verified** (the 2026-07-24 test-mode pass), and **re-sliced Phase 7** — which had grown from "final polish & debugging" into a mix of real build work, discrete fixes, open-ended polish, and the real-account verification pass.
+
+**Phase 7 → four slices, verification last:**
+- **7a — entitlement-completion build:** the unbuilt **file-count lever** (`plans.max_files` + a `user_files` insert-count check + client UX), the **`early_access → free` rename**, the **inverted storage-seed fix** (`free < basic < pro`), and the two Phase 6 billing follow-ups pulled in here (over-limit save → **dialog**; webhook **revert on terminal non-granting statuses**). All schema edits ride **one `0005` re-apply**. Rationale for folding the billing follow-ups in: the whole billing/entitlement surface is then complete before 7d verifies it once, rather than verify → change the webhook → re-verify.
+- **7b — loose ends (known issues):** OAuth provider config (GitHub/MS/Facebook), per-file size ceiling, legal-page content, the checkout-return "activating…" notice. ("Storage-quota constraints" decomposed — seed fix → 7a, final values → Phase 9.)
+- **7c — polish:** the user's own list + a final UI/UX pass. **Left unbounded by choice** — stop point is a judgement call at the time; working bar is "no rough edge a beta user would trip on," with discretionary refinement deferred to real beta signal.
+- **7d — real-account verification & beta sign-off:** the consolidated real-account backlog + all Phase 6/7a payment surfaces → the user's beta-ready sign-off, the gate into Phase 8.
+
+**Why verify last:** 7d's backlog re-tests surfaces that 7b/7c change, so verifying earlier only goes stale before beta; instead each build/fix slice self-checks, and 7d certifies the app as it will actually ship. (Phase boundaries 7/8/9 unchanged — this is internal slicing, not a re-sequence, so no new ADR.)
+
+**Docs touched:** `03-rollout.md` Phase 7 rewritten into 7a–7d; `00-overview.md` status + current-status updated (Phase 6 built+verified, tier shape per ADR-032, the Phase 7 re-slice); `04-backlog.md` file-count-lever + checkout-return items pointed at their slices; this entry.
+
+### Where to resume
+- Dev work starts **7a** — the `0005` revision (`max_files` + rename + seed reorder) and its enforcement/UX, plus the two billing fixes in the api/app repos. User re-applies `0005` once and re-runs the affected Phase 6 test-mode checks.
+- **7c** polish list is the user's; **7d** is the user's real-account pass.
+
+---
+
 ## 2026-07-25 — Plan-tier product shape settled (ADR-032) + ops docs
 
 A planning session (no app code shipped) settling the commercial *shape* on top of the built Phase 6 mechanism, plus two operational docs.
