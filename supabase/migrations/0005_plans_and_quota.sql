@@ -1,9 +1,10 @@
 -- 0005_plans_and_quota.sql
 -- Cloud epic — Phase 6 (monetise): the paid-plans layer.
---   * public.plans      — a lookup of tier → storage limit (+ display metadata).
+--   * public.plans      — a lookup of tier → storage + file-count limits.
 --   * public.user_plans — one server-authoritative plan row per user.
 --   * a default-plan trigger on auth.users so every user has a plan row.
 --   * a storage-quota trigger on user_files enforcing the per-plan byte limit.
+--   * a file-count trigger on user_files enforcing the per-plan file limit.
 --
 -- Apply to the NON-PROD Supabase project via the SQL Editor (see ./README.md),
 -- AFTER 0001-0004. Idempotent: safe to re-run.
@@ -15,6 +16,15 @@
 -- beta). Storage is the summed byte-size of a user's inline GeoJSON, measured
 -- identically to the user_storage_usage view (0003) so the usage bar and the
 -- gate agree.
+--
+-- Amended in place for Phase 7a (2026-07-26, pre-prod per ADR-023). Four changes,
+-- all riding this single re-apply:
+--   * `early_access` renamed to `free` (ADR-032) — the permanent free cloud tier.
+--   * Seed limits reordered to be monotonic (free < basic < pro); the old seed
+--     had basic 250 MiB sitting BELOW free 1 GiB.
+--   * `plans.max_files` + the file-count trigger — the second entitlement lever
+--     of ADR-032, previously chosen but unenforced.
+--   * `plans.description` + the hidden `discount` / `god_mode` plans (ADR-034).
 
 -- ============================================================================
 -- 1. plans — the tier lookup. Limits are DATA (ADR-031): change a tier with a
@@ -22,6 +32,8 @@
 --    authenticated user may read it (for the usage bar / upgrade UI).
 --    Limit values are PROVISIONAL (finalised at go-live from beta usage data —
 --    ADR-030) and expressed in 1024-based bytes to match the client's formatter.
+--    Two levers, both enforced by triggers below (ADR-032): total stored bytes
+--    and file count. Core editing/conversion is never gated.
 -- ============================================================================
 create table if not exists public.plans (
   plan        text   primary key,
@@ -30,14 +42,48 @@ create table if not exists public.plans (
   rank        int    not null default 0   -- display/upgrade ordering
 );
 
-insert into public.plans (plan, limit_bytes, label, rank) values
-  ('early_access', 1073741824, 'Early access', 0),  -- 1 GiB  (free cloud allowance)
-  ('basic',         262144000, 'Basic',        1),  -- 250 MiB
-  ('pro',          5368709120, 'Pro',          2)   -- 5 GiB
+-- Added by the Phase 7a amendment; `add column if not exists` (rather than a
+-- changed create) is what keeps this script re-runnable on a project that
+-- already has the Phase 6 shape. max_files is made NOT NULL after the seed
+-- below, so a plan row can never silently mean "unlimited" (see section 5).
+alter table public.plans add column if not exists max_files integer;
+-- A maintainer's private memo of what each row is for (ADR-034). NEVER rendered
+-- to users — and note `plans` is readable by any authenticated client (policy
+-- below), so this is documentation, not a secret. See docs/RUNBOOK.md.
+alter table public.plans add column if not exists description text;
+
+insert into public.plans (plan, limit_bytes, label, rank, max_files, description) values
+  ('free',       31457280,          'Free',      0,       3,
+   'Default plan for every new cloud account.'),
+  ('basic',      524288000,         'Basic',     1,      50,
+   'Paid tier availabe to the public.'),
+  ('pro',        21474836480,       'Pro',       2,    1000,
+   'Paid tier availabel to the public.'),
+  -- Hidden plans (ADR-034): real, enforced tiers that are never listed in the
+  -- upgrade UI. `discount` mirrors Pro's limits — the difference is the private
+  -- Stripe price, not the entitlement. `god_mode` is the maintainer's own row:
+  -- sentinel limits, effectively no gate. Assignment: docs/RUNBOOK.md.
+  ('discount',   21474836480,       'Discount',  50,   1000,
+   'PRIVATE plan, not available to the public, used for special purposes.'),
+  ('god_mode',   1125899906842624,  'God Mode',  100, 1000000,
+   'PRIVATE plan, not available to the public, for myself only.')
 on conflict (plan) do update
   set limit_bytes = excluded.limit_bytes,
       label       = excluded.label,
-      rank        = excluded.rank;
+      rank        = excluded.rank,
+      max_files   = excluded.max_files,
+      description = excluded.description;
+
+-- Any plan row added by hand before this amendment (or by a maintainer who
+-- omitted max_files) gets the free allowance rather than a NULL that would read
+-- as "unlimited" in the trigger. Then lock the column down.
+update public.plans
+  set max_files = (select max_files from public.plans where plan = 'free')
+  where max_files is null;
+alter table public.plans alter column max_files set not null;
+
+-- (The pre-7a `early_access` row is retired in section 2, once the user_plans
+-- rows that reference it have been moved across — the FK forces that order.)
 
 alter table public.plans enable row level security;
 revoke all on public.plans from anon;
@@ -64,7 +110,7 @@ create policy "plans_select_all" on public.plans
 create table if not exists public.user_plans (
   user_id                uuid        primary key
                                      references auth.users (id) on delete cascade,
-  plan                   text        not null default 'early_access'
+  plan                   text        not null default 'free'
                                      references public.plans (plan),
   status                 text,                 -- Stripe subscription status
   stripe_customer_id     text,
@@ -73,6 +119,15 @@ create table if not exists public.user_plans (
   created_at             timestamptz not null default now(),
   updated_at             timestamptz not null default now()
 );
+
+-- The `early_access` → `free` rename (ADR-032) on a project that already has the
+-- Phase 6 shape: move the rows across, then the column default, then retire the
+-- old lookup row. The FK from user_plans.plan is what dictates that order — the
+-- `plans` row can't go until nothing references it. All three are no-ops on a
+-- fresh project.
+update public.user_plans set plan = 'free' where plan = 'early_access';
+alter table public.user_plans alter column plan set default 'free';
+delete from public.plans where plan = 'early_access';
 
 -- Reuse the shared updated_at trigger function created in 0001.
 drop trigger if exists user_plans_set_updated_at on public.user_plans;
@@ -101,9 +156,9 @@ create policy "user_plans_select_own" on public.user_plans
 
 -- ============================================================================
 -- 3. Default plan for every user. A trigger on auth.users insert writes a
---    default `early_access` row (the free cloud allowance) so every signed-in
---    user always has a plan the quota check can resolve — created SERVER-SIDE,
---    not by the client (ADR-031). security definer + a pinned search_path so it
+--    default `free` row (the free cloud allowance) so every signed-in user
+--    always has a plan the quota checks can resolve — created SERVER-SIDE, not
+--    by the client (ADR-031). security definer + a pinned search_path so it
 --    runs with the privileges needed to write user_plans regardless of the
 --    signup path (email/OAuth). Existing users are backfilled once below.
 -- ============================================================================
@@ -115,7 +170,7 @@ set search_path = public
 as $$
 begin
   insert into public.user_plans (user_id, plan)
-  values (new.id, 'early_access')
+  values (new.id, 'free')
   on conflict (user_id) do nothing;
   return new;
 end;
@@ -128,7 +183,7 @@ create trigger on_auth_user_created
 
 -- One-time backfill: give every pre-existing user a default plan row.
 insert into public.user_plans (user_id, plan)
-select id, 'early_access' from auth.users
+select id, 'free' from auth.users
 on conflict (user_id) do nothing;
 
 -- ============================================================================
@@ -162,7 +217,7 @@ begin
     return new;
   end if;
 
-  -- The user's byte limit, from their plan; fall back to early_access defensively
+  -- The user's byte limit, from their plan; fall back to free defensively
   -- (the auth.users trigger guarantees a row, so the fallback is belt-and-braces).
   select p.limit_bytes into v_limit_bytes
   from public.user_plans up
@@ -170,7 +225,7 @@ begin
   where up.user_id = new.user_id;
 
   if v_limit_bytes is null then
-    select limit_bytes into v_limit_bytes from public.plans where plan = 'early_access';
+    select limit_bytes into v_limit_bytes from public.plans where plan = 'free';
   end if;
 
   -- Current usage across the user's OTHER files (exclude the row being written),
@@ -194,3 +249,53 @@ drop trigger if exists user_files_enforce_quota on public.user_files;
 create trigger user_files_enforce_quota
   before insert or update on public.user_files
   for each row execute function public.enforce_storage_quota();
+
+-- ============================================================================
+-- 5. File-count enforcement (Phase 7a, ADR-032 — the second tier lever).
+--    A BEFORE INSERT trigger rejects a NEW file once the user is at their plan's
+--    max_files. INSERT only, deliberately: updates and deletes must always stay
+--    open, the same humane-downgrade rule the storage trigger follows — a user
+--    who drops to a smaller plan keeps every existing file editable, they just
+--    can't add another until they're back under the cap.
+--    security invoker, like the quota trigger, so the COUNT is RLS-scoped to the
+--    writer's own rows. "Unlimited" is a sentinel (god_mode's 1e6), never NULL —
+--    max_files is NOT NULL precisely so a missing value can't read as no gate.
+-- ============================================================================
+create or replace function public.enforce_file_count()
+returns trigger
+language plpgsql
+security invoker
+as $$
+declare
+  v_max_files int;
+  v_count     bigint;
+begin
+  select p.max_files into v_max_files
+  from public.user_plans up
+  join public.plans p on p.plan = up.plan
+  where up.user_id = new.user_id;
+
+  -- No plan row (belt-and-braces — the auth.users trigger guarantees one): fall
+  -- back to the free allowance rather than letting the insert through ungated.
+  if not found then
+    select max_files into v_max_files from public.plans where plan = 'free';
+  end if;
+
+  select count(*) into v_count
+  from public.user_files
+  where user_id = new.user_id;
+
+  if v_count >= v_max_files then
+    raise exception
+      'GS_FILE_LIMIT_REACHED: file limit reached (limit % files)', v_max_files
+      using errcode = 'check_violation';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists user_files_enforce_file_count on public.user_files;
+create trigger user_files_enforce_file_count
+  before insert on public.user_files
+  for each row execute function public.enforce_file_count();

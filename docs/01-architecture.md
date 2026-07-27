@@ -15,9 +15,11 @@
 
 Supabase provides Postgres + Auth + Storage in one pre-integrated service.
 
-- **GeoJSON blob lives inline** in a Postgres `jsonb`/`text` column — no practical size limit for normal files, and no separate object store to manage.
+- **The GeoJSON blob lives in Supabase Storage**, as an object in a private `user-files` bucket at `{user_id}/{file_id}.geojson`. `public.user_files` keeps identity, name, and timestamps and is a **metadata row**.
 - **Auth** issues JWTs the SPA uses directly.
-- **Storage** (their S3-backed blob store) is held in reserve, used only if files become large enough to warrant moving the blob out of the row (see [`04-backlog.md`](04-backlog.md)).
+- **Postgres** holds everything that is *not* the blob: file metadata, settings KV, plans/entitlements.
+
+> **Changed 2026-07-27 — [ADR-035](02-decisions.md#adr-035--the-geojson-blob-moves-to-supabase-storage-user_files-becomes-a-metadata-row).** Phases 2–7a stored the blob **inline** in a `jsonb` column, with Storage "held in reserve… only if files become large enough." That reserve was called in the hard way: a **43 MB** file crashed the entire Supabase project (PostgREST OOMs materialising the payload — `520` on the write, `521` on the read-back), twice, while the anonymous IndexedDB path handled the same file fine. The blow-up happens **upstream of Postgres**, so no trigger, `CHECK`, or policy could guard it, and a client-side cap is bypassable by request replay ([ADR-033](02-decisions.md#adr-033--no-server-side-geojson-content-validation-integrity-via-quota-and-tos)). The move also removes the read ceiling and the per-edit TOAST/WAL write amplification. **Authorization is unchanged in kind** — still client-direct, still RLS — the boundary simply extends to `storage.objects`, keyed on the owner path prefix.
 
 ## 3. Integration: client-direct + RLS
 
@@ -32,7 +34,7 @@ The Vue app talks to Supabase **directly** via `supabase-js`. Per-user authoriza
 
 A small **provider** abstraction sits between the rest of the app and the actual backend, so the app never knows which backend is in use. Both providers live in `src/services/storage/`, organised into `file/` and `settings/` subfolders (each holding that seam plus its local/remote backends). There are two seams:
 
-1. **File seam** — the active GeoJSON blob (today the `geojson_data` / `backup_geojson_data` records). Today wraps `dexieStorage`; routes to a Supabase-backed `RemoteStorageManager` when logged in.
+1. **File seam** — the active GeoJSON blob (today the `geojson_data` / `backup_geojson_data` records). Wraps `dexieStorage` for anonymous users; routes to a Supabase-backed backend when logged in. **The seam is what makes the ADR-035 storage move a one-line change** — the cloud backend is swapped from a `user_files.geojson` provider to a Supabase Storage provider without any consumer knowing, which is exactly the Phase 0 branch-by-abstraction payoff. Per the user's call (2026-07-27) the old Postgres blob provider stays in the repo as commented dead code, **with no feature flag**, until the new path is proven — a *code* fallback only, since the `geojson` column goes stale as soon as files are written to Storage.
 2. **Settings KV seam** — templates/bookmarks/preferences. Today wraps `localStorage`; routes to a Supabase-backed implementation when logged in.
 
 Both expose the same minimal **method surface** — `getItem(key)`, `setItem(key, value)`, `removeItem(key)`, `clear()` — but they differ in timing, and that difference is load-bearing:
@@ -55,13 +57,22 @@ The unit of saved work is a **file** — one DB row per file. Bookmarks, templat
 auth.users                       — managed by Supabase Auth
   id (uuid), email, ...
 
-public.user_files
+public.user_files                -- METADATA ONLY (ADR-035); the bytes live in Storage
   id            uuid primary key
   user_id       uuid references auth.users(id)   -- RLS scope
   name          text
-  geojson       jsonb            -- the FeatureCollection, inline
   created_at    timestamptz
   updated_at    timestamptz
+  -- geojson jsonb  -- REMOVED (ADR-035, Phase 7b). Kept unwritten during the
+  --                -- dead-code overlap, then dropped. The FeatureCollection is
+  --                -- now an object at user-files/{user_id}/{file_id}.geojson
+
+storage.objects (Supabase-managed)              -- the blob store
+  bucket_id = 'user-files'                       -- private bucket, explicit file_size_limit
+  name      = '{user_id}/{file_id}.geojson'      -- owner prefix is the RLS key
+  metadata->>'size'                              -- the ONLY authoritative byte count;
+                                                 -- a client-written size column would be
+                                                 -- spoofable by request replay (ADR-033)
 
 public.user_settings
   user_id       uuid references auth.users(id)
@@ -72,20 +83,23 @@ public.user_settings
 -- Payments (Phase 6 — ADR-022/ADR-030/ADR-031) — server-authoritative (auth-trigger +
 -- webhook write; client reads own row; never client-writable):
 public.plans                            -- tier lookup; limits are DATA (ADR-031)
-  plan                   text primary key -- "early_access" | "basic" | "pro"
+  plan                   text primary key -- "free" | "basic" | "pro" (+ hidden rows)
   limit_bytes            bigint           -- per-tier storage quota
+  max_files              int not null     -- per-tier file-count cap (ADR-032)
   label, rank                             -- display metadata
+  description            text             -- private maintainer memo (ADR-034)
 
 public.user_plans
   user_id                uuid primary key references auth.users(id)
-  plan                   text default 'early_access' references plans(plan)
+  plan                   text default 'free' references plans(plan)
   status                 text             -- stripe subscription status
   stripe_customer_id     text
   stripe_subscription_id text
   current_period_end     timestamptz
   -- Every user has a row: a security-definer trigger on auth.users writes a
-  -- default 'early_access' row on signup (ADR-031), so "free = no row" from
-  -- ADR-022 became "free = a default early_access row". RLS: owner SELECT only.
+  -- default 'free' row on signup (ADR-031), so "free = no row" from ADR-022
+  -- became "free = a default free-plan row". RLS: owner SELECT only.
+  -- (The plan was named 'early_access' until the Phase 7a rename — ADR-032.)
 ```
 
 > **Phase 2 implementation note (ADR-016, amended by ADR-023).** The active-document table is **`public.user_files`** (renamed from `files` for consistency — ADR-023). The first migration (`supabase/migrations/0001_files_and_user_settings.sql`) refines this sketch: `user_settings.value` is **`text`** (the settings seam round-trips opaque `localStorage` strings, so text is a lossless mirror), `name` is **deferred to Phase 3**, and `user_files` carries a temporary **one-row-per-user** unique index for the Phase 2 single-active-file model (dropped in `0002`). There is **no `backup_geojson` column** — cloud File→New is non-destructive, so the backup/undo machinery is local-only (ADR-018/023).
@@ -98,6 +112,15 @@ create policy "owner reads"   on public.user_files for select using (auth.uid() 
 create policy "owner inserts" on public.user_files for insert with check (auth.uid() = user_id);
 create policy "owner updates" on public.user_files for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "owner deletes" on public.user_files for delete using (auth.uid() = user_id);
+```
+
+The **same shape applies to the blob**, on `storage.objects`, keyed on the owner path prefix instead of a column (ADR-035). This is a **second security surface** and belongs in the two-account isolation test alongside the tables:
+
+```sql
+-- example shape; final SQL lives with the migrations
+create policy "owner reads objects" on storage.objects for select to authenticated
+  using (bucket_id = 'user-files' and (storage.foldername(name))[1] = auth.uid()::text);
+-- …insert / update / delete mirror this; anon is revoked entirely.
 ```
 
 ## 6. What moves to the cloud vs stays local

@@ -12,7 +12,7 @@ Migrations are applied in **filename order**:
 | `0002_multi_file.sql` | Phase 3: drop the one-row-per-user index on `user_files`, add `user_files.name` (multiple named files per user). |
 | `0003_storage_usage_view.sql` | Phase 5 (account area): `public.user_storage_usage`, a `security_invoker` view summing each user's GeoJSON bytes + file count, read client-direct (owner-scoped via `user_files` RLS). |
 | `0004_user_profiles.sql` | Phase 5 (compliance): `public.user_profiles`, a generic per-user table (owner-only RLS) whose first columns record Terms/Privacy acceptance (`terms_accepted_at`, `terms_version`), written by the client on first login. |
-| `0005_plans_and_quota.sql` | Phase 6 (monetise): `public.plans` (tier → storage limit lookup) + `public.user_plans` (server-authoritative per-user plan/Stripe state, owner-read-only), a default-plan trigger on `auth.users` (+ backfill), and a storage-quota trigger on `user_files` enforcing the per-plan byte limit. |
+| `0005_plans_and_quota.sql` | Phase 6 (monetise): `public.plans` (tier → storage + file-count limits) + `public.user_plans` (server-authoritative per-user plan/Stripe state, owner-read-only), a default-plan trigger on `auth.users` (+ backfill), and a storage-quota trigger on `user_files` enforcing the per-plan byte limit. **Amended for Phase 7a** (2026-07-26): `early_access` renamed **`free`**, monotonic seed limits, `plans.max_files` + a **file-count** trigger, `plans.description` + the hidden `discount`/`god_mode` plans. |
 
 ## How to apply (manual, for now)
 
@@ -65,14 +65,27 @@ After applying `0004`:
 
 After applying `0005`:
 
-- **Table Editor** → `plans` exists (three seeded rows: `early_access`, `basic`, `pro`) and `user_plans` exists with **RLS enabled**.
+- **Table Editor** → `plans` exists and `user_plans` exists with **RLS enabled**. Five seeded rows — three public tiers plus the two hidden ones (never listed in the upgrade UI — see [`../../docs/RUNBOOK.md`](../../docs/RUNBOOK.md)); limits must be **monotonic** on both axes:
+  ```sql
+  select plan, limit_bytes, max_files, rank from public.plans order by rank;
+  -- expect: free      31457280         3
+  --         basic     524288000       50
+  --         pro       21474836480   1000
+  --         discount  21474836480   1000   (hidden)
+  --         god_mode  1125899906842624  1000000   (hidden)
+  ```
+- **The `early_access` → `free` rename landed** (Phase 7a) — the old slug is gone and no user is stranded on it:
+  ```sql
+  select count(*) from public.plans      where plan = 'early_access';  -- expect: 0
+  select count(*) from public.user_plans where plan = 'early_access';  -- expect: 0
+  ```
 - **Every user has a plan row (backfill)** — the count matches the user count:
   ```sql
   select
     (select count(*) from auth.users)        as users,
     (select count(*) from public.user_plans) as plan_rows;   -- expect: equal
   ```
-- **New signups get a default row** — the `on_auth_user_created` trigger inserts one automatically. Create a throwaway user and confirm a matching `user_plans` row appears (`plan = 'early_access'`).
+- **New signups get a default row** — the `on_auth_user_created` trigger inserts one automatically. Create a throwaway user and confirm a matching `user_plans` row appears (`plan = 'free'`).
 - **service_role can reach both tables via PostgREST** — the Node checkout/webhook use the service_role key over PostgREST, which needs an explicit table grant (BYPASSRLS does not cover table privileges; on this project service_role did not inherit the default grants). Confirm the grants landed:
   ```sql
   select grantee, table_name, string_agg(privilege_type, ',' order by privilege_type) as privs
@@ -91,12 +104,20 @@ After applying `0005`:
   update public.user_plans set plan = 'pro';               -- expect: 0 rows / not permitted
   reset role;
   ```
-- **Quota gate** — as a real user, editing a file so its GeoJSON grows past the plan's `limit_bytes` is rejected with a `GS_QUOTA_EXCEEDED` error, while shrinking or deleting a file always succeeds (even when already over limit). Temporarily lowering a `plans.limit_bytes` below a user's current usage is a quick way to exercise the reject path without a huge file:
+- **Storage-quota gate** — as a real user, editing a file so its GeoJSON grows past the plan's `limit_bytes` is rejected with a `GS_QUOTA_EXCEEDED` error, while shrinking or deleting a file always succeeds (even when already over limit). Temporarily lowering a `plans.limit_bytes` below a user's current usage is a quick way to exercise the reject path without a huge file:
   ```sql
-  -- e.g. drop early_access to 1 KB, attempt a grow (blocked), a shrink (allowed), then restore.
-  update public.plans set limit_bytes = 1024 where plan = 'early_access';
+  -- e.g. drop free to 1 KB, attempt a grow (blocked), a shrink (allowed), then restore.
+  update public.plans set limit_bytes = 1024     where plan = 'free';
   -- ... test writes as the user ...
-  update public.plans set limit_bytes = 1073741824 where plan = 'early_access';
+  update public.plans set limit_bytes = 31457280 where plan = 'free';
   ```
+- **File-count gate** (Phase 7a) — a *new* file once the user is at `max_files` is rejected with `GS_FILE_LIMIT_REACHED`, while editing and deleting existing files stay open (the same humane-downgrade rule as storage). Lower the cap below the user's current file count to exercise it:
+  ```sql
+  update public.plans set max_files = 1 where plan = 'free';
+  -- as the user: File → New then draw (the lazy insert) is blocked; editing an
+  -- existing file still saves; deleting one still works.
+  update public.plans set max_files = 3 where plan = 'free';
+  ```
+  Both triggers are `security invoker`, so their `sum`/`count` over `user_files` are RLS-scoped to the writer — exercise them as a **real user**, not in the privileged SQL Editor role.
 
 The full cross-user isolation proof (two real accounts can't see each other's rows) happens once the app's remote provider can write data — see `docs/05-worklog.md`.
