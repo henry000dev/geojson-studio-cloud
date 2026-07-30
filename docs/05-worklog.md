@@ -4,6 +4,94 @@
 
 ---
 
+## 2026-07-28 — ADR-036: local storage will buffer cloud writes (journal promoted to 7c); IndexedDB-as-staging-area rejected
+
+Discussion only — **no code**. Manual verification of the reworked autosave came back clean (rapid points and rapid deletes both persist; the "Leave site?" dialog appears only when you beat the window, which is the guard working). That closed the acute bug and opened the structural question behind it.
+
+**The proposal:** use IndexedDB as a staging area for cloud users — edit against local storage exactly as the anonymous path does, and schedule pushes to Supabase on top. Claimed: unified code across both paths, offline support, possibly no more seam, "like mobile apps do it".
+
+**The distinction that decided it:** a *staging area* makes local the source of truth (replication — conflicts, reconciliation, a state machine); a *journal* keeps the cloud authoritative and holds only un-acknowledged writes (no conflict resolution at all). The user's intent turned out to be the journal, so **[ADR-036](02-decisions.md#adr-036--local-storage-buffers-cloud-writes-the-recovery-journal-is-promoted-indexeddb-as-a-staging-area-is-rejected) adopts the journal and records the staging version as rejected**, with the reasoning, so it isn't re-derived later.
+
+Why staging fails, briefly: it needs conflict resolution over whole-document blobs, where a merge doesn't exist and sync can only pick a winner; **the Pro tier refutes it outright** (20 GiB can't be mirrored in browser quota → eviction → the cloud is authoritative again → it's a cache plus a seam, i.e. what we already have, with more parts); quota rejection detaches from the action that caused it; cloud bytes in the browser store become a sign-out privacy problem that is currently structural; and it doesn't fix the 43 MB crash. The simplification claim inverts — the seam is ~50 lines and is what makes the ADR-035 cutover one line, while the local store would need a **multi-file schema** it doesn't have today. The mobile-app comparison holds only for frameworks syncing small *records*; the real prerequisite for local-first here is the parked **per-feature row model** (`file_features`).
+
+**What was promoted, and why now.** The journal is ADR-025's Level 2, which sat behind "build only if users actually report lost work" — that trigger is **retired**. The three rounds of debounce tuning showed the deficiency is structural: durability was coupled to upload frequency, so one number was trading lost edits against saved bandwidth. A local buffer decouples them and lets 7b-1's adaptive window be deleted. Also recorded against ADR-025: `beforeunload` **warns without writing**, so Level 1 never covered the horizon that ADR assumed it did.
+
+Two design constraints, both learned from 7b-1 rather than reasoned in advance: the journal write must be **immediate** (a debounced journal inherits the same teardown failure it exists to solve), and it must be **keyed by file id** (or file A's journal restores into file B — the flush-boundary bug class). No new dependency: Dexie is already there. `workbox-background-sync` noted as the one genuinely interesting future addition — a Service Worker queue is the only thing that can finish an upload *after* the tab closes — but the app has no Service Worker and that's 7d at the earliest.
+
+**Sequenced after 7b-2**, on the user's agreement. The deciding reason is that the journal's retry logic must classify which failures are retryable, and 7b-2 changes every one of those answers.
+
+### Where to resume
+- **Unchanged:** 7b-2 is next and still gated by the two ADR-035 prototypes. I offered to write both scripts.
+
+---
+
+## 2026-07-28 — 7b-1 follow-up: the debounce lost edits on refresh; the coalescing window is now priced by save cost, plus `beforeunload`
+
+**e2e suite green** on the 7b-1 build. But manual verification found the regression the previous entry flagged as a "best effort" caveat, and it is worse than described: **drawing five points quickly and refreshing persisted only three.**
+
+**The `pagehide` flush does not work — it was never a mitigation, only a hope.** Count the hops a flush must survive before a byte lands: `runPendingSave` → `performSaveWithStatus` → `await handleSaveStart` → `performSave` → `fileStorage.setItem` → `resolveBackend` (async) → Dexie → and only then an IndexedDB transaction that still has to commit. The browser aborts in-flight IndexedDB transactions during teardown, so on reload the write reliably loses. Nothing about "3 of 5" is special: points 1–3 fell inside one window that expired normally and wrote; 4–5 were still owed at refresh and went.
+
+**A second defect, found reading the code rather than from the report:** on page-hide, `runPendingSave` chained the flush *behind* any in-flight write with `.then()`, so the flush did not even **start** until the earlier write resolved. During teardown that is a guaranteed loss — strictly worse than racing. Chaining is correct for timer-driven saves (it stops two whole-document writes landing out of order) and wrong for a flush; it is now `runPendingSave({ immediate: true })` from the page-hide listeners only.
+
+**First attempt — a path-aware window — was the wrong axis, and manual verification on the *cloud* path found it still losing edits (1, 2, 3 at random; same on rapid deletes).** Cloud kept 1200 ms plus a network round-trip, so the real exposure after the last click was ~1.5 s. Not a new defect — the window left in place deliberately — but the reasoning that left it there does not survive contact.
+
+**The design error underneath: the debounce was never about *path*, it was about *cost*.** The justification was upload bandwidth — re-sending 20 MB on a phone connection. That argument scales with the **document**, not the backend. A five-point file is a few hundred bytes; coalescing it protected bandwidth nobody was using while still charging full price in lost edits. Splitting local-vs-cloud made exactly that mistake, and `isRemoteWriteTarget()` — added that morning for the split — was removed again.
+
+**The window is now priced by how long the last save actually took.** That measures the cost directly, needs no serialising a 40 MB document to estimate its size, and is self-tuning across both paths: a small cloud file (fast round-trip) gets the short window, a large one gets the long one, local is almost always cheap. Documents get expensive gradually, so the previous save predicts the next.
+
+- `SAVE_IS_CHEAP_BELOW_MS = 500` — comfortably above a small-file Supabase round-trip, well below a large upload.
+- **cheap → `AUTO_SAVE_DEBOUNCE_CHEAP_MS = 200`** plus a **leading-edge write** (first edit of a burst goes straight through). Self-limiting: the fast path needs nothing in flight, so when writes finish between clicks it degrades to write-every-edit, and when they don't the burst coalesces.
+- **costly → `AUTO_SAVE_DEBOUNCE_COSTLY_MS = 1200`**, no leading edge. The bandwidth saving lives here and only here.
+- Unmeasured counts as **cheap**, so one edit then reload keeps the edit. Guessing wrong moves a write earlier; it does not add one. Duration is recorded on success only — a failed save times the failure, not the document.
+
+**ADR-025's `beforeunload` guard pulled forward from 7c**, because nothing else covers a costly save still owed at unload. It protects by two mechanisms and the second is the one that saves the file: it *warns* (browser wording, not ours), and it **buys time** — the dialog is synchronous and blocks navigation, so the write kicked off in the handler gets the whole time the user spends reading it, which is far more than it needs. Staying finishes the save outright. Gated on `hasPendingSave() || saveHasFailed` and silent otherwise: a guard that fires on every close trains people to click through it.
+
+Also dropped the `await`s on `SaveStatusHelper` in `performSaveWithStatus` — the helper is synchronous, so awaiting it only inserted microtask hops ahead of the write: dead weight normally, material during teardown.
+
+App build clean; `supabase-client` still its own 203 kB chunk.
+
+### Where to resume
+- **User:** re-run e2e — **`beforeunload` is new and interacts with the suite's ~20 reloads.** It should stay silent (`waitForSaveIdle` already precedes every reload that follows an edit, and Playwright auto-handles dialogs), but that is a prediction, not a result. Then repeat the rapid-points and rapid-deletes checks on **both** paths, and commit.
+- **Then 7b-2**, unchanged and still gated by the two ADR-035 prototypes below.
+- **Note for 7b-2:** moving the blob to Storage changes what a save costs, so it re-prices this window automatically — no tuning needed, but worth re-running the same manual check once the new backend is in.
+
+---
+
+## 2026-07-27 — Phase 7b-1 built: import cap aligned, honest import errors, import-path quota → dialog, coalesced autosave
+
+> **Superseded in part (2026-07-28):** the e2e suite ran green, and the "best effort" page-hide caveat below proved to be a real data-loss bug. The debounce is now path-aware — see the entry above.
+
+All four items of slice **7b-1** built in the app repo (`cloud-epic`). No schema, no API change — 7b-1 was always meant to ship on its own, and does. App `npm run build` clean; the Supabase SDK is still its own chunk (main bundle +1.6 kB). **The e2e suite has not been run — that's the user's, and this slice touches it (see the caveat below).**
+
+**The ceiling is one number now.** `MAX_FILE_SIZE_FOR_FILE_IMPORT` drops from `50 * 1024 * 1024` to **`50000000`** (decimal), the value the `user-files` bucket's `file_size_limit` will carry in 7b-2. Both the file picker and drag-drop route through `validateDroppedFile`, so there was a single cap site to change. As recorded in the ADR-032 addendum, this fixes nothing by itself — the 43 MB file passed the old cap too.
+
+**Import failures now say what actually failed.** `file-service.importFile` funnelled *every* unrecognised error into "The GeoJSON data is not valid." — so a dropped connection or a refused cloud write sent the user off to debug data that was fine. The persistence step is now its own method (`persistImportedFile`) whose failures are classified as storage failures, leaving the generic fallback to cover only the parse/load step it was always meant to describe. `restoreCurrentFileAfterFailedImport()` no longer swallows its own failure silently: it returns whether the previous file made it back and the message says so when it didn't, instead of leaving a blank canvas explained only by an error about the import. Its old comment ("the file remains intact in IndexedDB") was also an assumption ADR-035 disproves — a cloud read carries the same ceiling as a write.
+
+**The 7a import-path gap is closed.** Because the import path writes through the seam directly rather than through `AutoSaveService`, `GS_QUOTA_EXCEEDED` / `GS_FILE_LIMIT_REACHED` never reached `PlanLimitDialog`. They do now. The dialog gained a **`context`** on its event payload (`save` | `import`), because the two cases leave the editor in opposite states and the existing advice text — *"Your edits are still on screen but unsaved. Export this file to keep a copy…"* — is actively wrong after an import, which is rolled back to the previous file. This is the case ADR-032 called out: the 50 MB per-file ceiling sits *above* the free tier's 30 MiB quota, so a free user importing a large file must get the upgrade prompt, not "file too large".
+
+**Autosave coalesces** (`AUTO_SAVE_DEBOUNCE_MS = 1200`, `AUTO_SAVE_MAX_WAIT_MS = 8000` — the max-wait exists so continuous drawing still checkpoints instead of pushing the debounce out indefinitely). All eleven call sites moved from `save()` to `scheduleSave()`; `save()` was left orphaned by that and removed rather than kept as dead code. Writes chain rather than overlap, so two whole-document saves can't land out of order. Timer-driven failures report to Sentry explicitly, replacing the rethrow-at-the-call-site that used to carry them.
+
+**The part that wasn't in the plan: coalescing breaks an invariant the code relied on.** `FilesView.openFile` carried the comment *"Autosaves are per-op and by-id (ADR-018), so nothing needs flushing here."* That was true only because saves were immediate. An owed save carries no file id of its own, so it lands on whatever file is active when it fires — and the editor's draw manager **survives navigation to `/files`** (MapView's unmount doesn't destroy it), so the timer really can fire while the user is picking another file. ADR-018's "pending autosave flushed first" stopped being free. A small `active-auto-save.js` registry publishes the live service so callers with no draw-manager reference can flush; **six boundaries** now do:
+- **file switch** (`FilesView.openFile`) — the owed snapshot would be written into the newly adopted row;
+- **file delete** (`FilesView.confirmDelete`) — worse than a no-op: once the store detaches the active file, the same write *lazily creates a replacement row*, so deleting a file would silently spawn a new one holding its contents;
+- **File→New** — same lazy-create problem on the cloud path; and on the **local** path `createNewFile()` *reads* storage to build the undo backup, so a stale read would back up a file missing the user's last edits;
+- **Import** (both the `hasSavedFile()` replace-warning check and the import itself) — a pending snapshot of the outgoing file could otherwise land *after* the import's own write and overwrite what was just imported;
+- **sign-out** — write while the session is still valid; afterwards the seam routes to local and the cloud write would simply fail.
+
+### Caveats — both are the user's to close
+
+- **The e2e suite must be run.** It exercises **only** the anonymous/local path (no spec uses `?ff=cloud`), and ~20 `page.reload()` assertions prove persistence by reloading immediately after an edit — which now races the debounce. Scoping the debounce to the cloud path only would have avoided this entirely and was offered; **the user chose both paths**, so the suite was brought along: a new `waitForSaveIdle(page)` helper (`e2e/helpers/app-helpers.js`, polling `window.__gsDrawManager.autoSaveService.hasPendingSave()`) is now called before the **16** reloads that follow an edit, across 8 specs. The four reloads that are purely about `localStorage` settings (`colour-mode`, `welcome-splash`, `narrow-screen-warning`, `widgets`' session-token seed) were left alone. All 8 specs parse (esbuild); **none have been executed.**
+- **Closing a tab inside the debounce window can still lose the last edit.** `pagehide` + `visibilitychange`→hidden listeners flush, but the write is async and the page may die first — **best effort, not a guarantee**. Before this slice every edit was written immediately, so this is a real regression traded for the bandwidth fix, and it is only fully closed by ADR-025's `beforeunload` guard, still unbuilt (7c/7d). Worth deciding deliberately rather than discovering later.
+
+**Also fixed in passing:** `FileService.reloadFromStorage` was **defined twice** in the class — the second definition silently overwrote the first, making lines 37–43 dead code. Harmless today (no caller used the discarded return value), but it sat inside the exact method this slice rewires, so it went. Unrelated and untouched: `npm run lint` is broken repo-wide (ESLint 10 against a legacy `.eslintrc` + a removed `--ext` flag).
+
+### Where to resume
+- **User:** run the **e2e suite** (the real gate on this slice), then commit the app repo + these docs.
+- **Then 7b-2** — still gated by the **two prototypes** ADR-035 requires *before* committing to the migration shape: (1) does a `BEFORE INSERT OR UPDATE` trigger on `storage.objects` fire and reject cleanly without orphaning bytes? (2) may a `storage.objects` RLS policy contain a cross-table subquery? Both are SQL against the non-prod project. `0006_file_blobs_to_storage.sql` doesn't exist yet.
+- **Unchanged:** the 7a behavioural confirm-as-you-go checks are still outstanding (`unpaid` reverts the plan; over-limit save raises the dialog; new file over the cap blocked while edit/delete succeed).
+
+---
+
 ## 2026-07-27 — Large files crash the project: the blob moves to Supabase Storage (ADR-035); Phase 7 re-sliced with a new 7b
 
 Planning session (no app code). 7a's outstanding items were confirmed done by the user — `0005` re-applied, `service_role` grants correct (`user_plans` → `INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE`), all verification queries green — and staging OAuth was fixed (the recreated Supabase project had kept its default **Site URL**, so `redirectTo` wasn't allow-listed and Supabase silently fell back to `localhost:3000`; dashboard-only fix). Then large-file testing found the real problem.
