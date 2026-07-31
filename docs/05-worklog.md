@@ -4,6 +4,79 @@
 
 ---
 
+## 2026-07-31 — 7b-2 PAUSED: the user is rethinking the whole remedy; nothing built, nothing to unwind
+
+**Stop point.** Immediately after the signed-URL design was recorded, the user called a halt to reconsider the approach — possibly a different provider (Firebase named, with its size limits acknowledged), edge functions, or NoSQL documents. **No code and no SQL had been written**, so there is nothing to revert; `0006` never existed. Recorded in full as the [ADR-035 third addendum](02-decisions.md#adr-035--the-geojson-blob-moves-to-supabase-storage-user_files-becomes-a-metadata-row), with a factual note against each reason so a later reconsideration starts from the evidence rather than the summary. The three reasons, and what I'd want the reader to know about each:
+
+**"Writing the entire 50 MB file for every burst of edits isn't optimal for a paid product."** Correct — and ADR-035 says so itself under *Consequences*: "What this does **not** fix: editing cost." Worth being blunt that **this is a data-model problem, not a vendor problem.** Object storage makes each whole-document write far cheaper without making it smaller. The fix is the parked per-feature row model (`file_features`), and switching provider doesn't reach it: Firestore's ~1 MiB document ceiling means a 50 MB `FeatureCollection` can't be a document at all — it goes to Cloud Storage (structurally what we just designed) or gets split per feature, which *is* `file_features` under another name. The write-granularity backlog item is annotated accordingly; it has gone from parked to the live question.
+
+**"The quota mechanism is fiddly and not well supported by Supabase."** Fair, but it lands on a narrower target than it looks. Signed upload URLs and bucket `file_size_limit` are documented mainstream patterns; what needed prototyping was **our own** idea of a quota trigger on a vendor-managed table, and the prototypes killed it before it reached a migration — which is what they were for. What stays genuinely awkward with *any* provider: an aggregate byte quota has no first-class home in object storage, so it is application-level everywhere. Bounded-overshoot was the honest admission of that.
+
+**"Needing prototypes suggests this isn't a well-known path."** Half true, and the halves matter. P2 was novel and came back clean. P1 probed something we invented. Blob-in-object-store with metadata-in-SQL is the ordinary shape for this problem — but the *volume of bespoke machinery to make the quota exact* is a real smell, and that part of the instinct is sound.
+
+**What survives any provider decision** (so it isn't re-derived): the per-file ceiling as a uniform guardrail; tiers as data rows; two isolated paths with no sync; the recovery journal; cost-priced coalesced autosave (shipped); and the finding that whole-document writes are the real cost driver. **What is Supabase-specific and would be discarded:** `0006`, the `storage.objects` RLS work, the `security definer` publish lookup, the `protect_delete()` constraint, signed-URL mechanics.
+
+**ADR-035's diagnosis is unaffected and still binding** — a 43 MB `jsonb` write takes the whole project down, and the blob cannot stay in Postgres. Its *remedy* is what is under review; the ADR's Status line now says so.
+
+### Where to resume
+- **The user is rethinking the solution.** Nothing to do until that returns.
+- **P3 deliberately not written.** If the review comes back to Supabase Storage, the P1/P2 results stand and P3 is the only outstanding gate.
+- **Still true regardless of the outcome:** the 7a behavioural confirm-as-you-go checks are outstanding, and the whole-document write cost is a live problem that no provider choice resolves on its own.
+
+---
+
+## 2026-07-31 — Signed upload URLs adopted for 7b-2; the design recorded, and one assumption sent back for prototyping
+
+Discussion only — **no code**. The open decision from yesterday is settled in direction: **signed upload URLs**, not a `storage.objects` trigger. Design captured in the [ADR-035 addendum](02-decisions.md#adr-035--the-geojson-blob-moves-to-supabase-storage-user_files-becomes-a-metadata-row) (2026-07-31). Three things came out of working the design that were not visible when the recommendation was made:
+
+**Supabase has no per-user storage API**, so the quota check has no new machinery: Node reads the reworked `user_storage_usage` view with the `service_role` client it already has, joined to the plan. Same shape as `getUserPlan`.
+
+**The quota becomes bounded-overshoot rather than exact, and that is a real loss.** A signed URL authorizes a *path*, not a *byte count* — the client declares a size, Node checks and mints, and nothing stops the client uploading more. Bounded by the bucket's 50 MB `file_size_limit`, by `max_files`, and by the next check refusing the following write: worst case 3 × 50 MB against a `free` user's 30 MiB, visible in the usage figure, self-correcting on the next save. Accepted because the trigger's compensating defect — an apparently unbounded, *invisible* orphan channel — is worse. **Bounded-and-visible beats unbounded-and-invisible**, but this is a trade and is now on the record so it isn't rediscovered as a bug.
+
+**Write authorization moves from RLS to Node**, which is an amendment in spirit to ADR-002. The token is a capability, not a session. What keeps it safe is the path format: Node builds `{user_id}/{file_id}.geojson` from the *verified* `sub` claim, never from client input, so a leaked URL structurally cannot address another user's prefix. Reads stay client-direct under owner-only RLS, so ADR-002 bends only for the write-authorization step and only for the blob.
+
+**A new failure class arrives with it:** the mint can return `401` while the user has unsaved work on screen — a state that doesn't exist today. ADR-036's journal is the mitigation, and it's already in 7c. Worth noting the sequencing is now mutual: 7b-2 went first because retry logic must classify the *final* backend's failures, and 7b-2's chosen design adds a failure the journal answers.
+
+**One assumption deliberately not made.** Is a signed upload URL reusable, or consumed after one upload? Reusable → mint once per file per session and autosave costs nothing extra. Single-use → every autosave pays a Node round-trip before the write starts, which (because 7b-1 prices the coalescing window on *measured save duration*) would widen the window to 1200 ms and re-create the exact durability-versus-cost coupling ADR-036 exists to break; the journal would become a prerequisite rather than a companion. Given yesterday's round found three undocumented behaviours in this same API, this one gets a prototype rather than a guess.
+
+### Where to resume
+- **Next unit of work: write P3** — a ~20-line prototype that mints one signed upload URL, uploads twice, and reports whether the second is refused. Offered; not yet written.
+- **`0006_file_blobs_to_storage.sql` still cannot be written** — P3 decides whether the client mints per save or per session, which changes the client design though not the SQL. The SQL parts are otherwise settled: one private bucket, owner-only RLS for reads, the `user_storage_usage` rework, `security definer` publish lookup.
+- **Unchanged:** the 7a behavioural confirm-as-you-go checks are still outstanding.
+
+---
+
+## 2026-07-30 — ADR-035's two prototypes run: the quota trigger works and still loses; publish gets its one bucket
+
+**The 7b-2 gate is discharged.** Both prototypes written, run against non-prod by the user, and torn down clean. Scripts and method live in a new [`../supabase/prototypes/`](../supabase/prototypes/) directory — deliberately *outside* `migrations/`, on the rule that a script belongs there when we are about to write a migration whose shape depends on a third party's behaviour we cannot check by reading docs. Full findings in the [ADR-035 addendum](02-decisions.md#adr-035--the-geojson-blob-moves-to-supabase-storage-user_files-becomes-a-metadata-row); the short version:
+
+**The trigger mechanism is viable — the assumption this ADR rested on is confirmed.** It is creatable on `storage.objects`, it fires on the Storage API's *real* write path (not just on hand-written SQL), `metadata->>'size'` is populated at `BEFORE INSERT`, and `raise exception` genuinely refuses the write. Everything that follows is about what it costs, not whether it works.
+
+**Three findings turn the primary proposal into the fallback:**
+
+1. **An overwrite is an upsert.** One `PUT` fires `BEFORE INSERT` *then* `BEFORE UPDATE`, on a row that keeps its id and `created_at`. A trigger written as the direct analogue of `enforce_storage_quota` double-counts on every autosave (the `INSERT` branch sees no `OLD`, and `id <> new.id` misses the surviving row because the proposed row's id differs) **and** inverts humane-downgrade — a user already over quota would be blocked from deleting features to get back under. Autosave is the dominant write path, so this is the common case. The fix is known: defer in the `INSERT` branch when `(bucket_id, name)` already exists, and exclude by name rather than by id.
+2. **The rejection degrades to an opaque `500`.** PostgREST passes a raised message through — that is where today's over-limit dialog gets its text. The Storage API strips it: `HTTP 500`, `{"error":"DatabaseError","message":"database error, code: 23514"}`. Only the SQLSTATE survives. And `5xx` is what ADR-025's retry classifier treats as **transient**, so an over-quota user retries the whole upload forever and is never told to upgrade.
+3. **Orphans: `UNDETERMINED`, evidence favouring yes.** The metadata visible at `BEFORE INSERT` already carries S3's `eTag` and `httpStatusCode: 200` — the object write completed and was acknowledged *before* the row insert was attempted. The rejected 7.7 MB upload transferred in full (`100 Continue`) before refusal. Proof needs an S3-endpoint listing, not run; recorded as undetermined deliberately, since an orphan channel we cannot measure argues against the design as strongly as one we can.
+
+**Recommendation: promote the documented fallback — Node-issued signed upload URLs.** The only option that refuses *before the bytes move*, returns a clean `4xx` with our own message, and sidesteps the upsert arithmetic. **This is the one open decision and it is the user's** — the alternative (keep the trigger, fix the upsert, add a client pre-flight, let the reconciliation sweep bound the debris) preserves client-direct writes and is recorded in the addendum.
+
+**Found incidentally, and it is a hard constraint: `storage.protect_delete()`.** Direct SQL `DELETE` on `storage.objects` raises `42501`; inserts are permitted, so the guard is asymmetric. This makes ADR-035's account-deletion gap **worse than it states** — not merely that the cascade leaves objects behind, but that **no SQL mechanism can clean the rows either**. The `service_role` sweep via the Storage API is the only home for it. Compliance obligation, now mandatory rather than natural.
+
+**P2 came back clean, and publish keeps its one bucket.** A cross-table subquery in a `storage.objects` policy works — via a `security definer` lookup, since the naive form fails on a *grant* (`42501`), not on RLS. Preferred over granting `anon` read on `user_files`, which would let strangers enumerate every published file and its owner. Malformed object names must be regex-guarded before the `::uuid` cast, or one bad name breaks reads for the whole bucket. Cost negligible (0.285 ms, index scan). Anonymous `GET`: **200** published, non-disclosing `NoSuchKey` unpublished — so a revoked link reads as "not found", which is both safer and friendlier. **Revocation is immediate**, with one caveat: `cacheControl` is set by the *uploader* (`curl PUT` defaults to `no-cache`; the dashboard's multipart upload sets `max-age=3600`), so what is proven is that a `no-cache` object revokes instantly. That makes CDN-versus-revocation a deliberate per-upload choice rather than an inherited constraint.
+
+**Three lessons about the harness itself**, all of which cost a re-run and are now fixed in the scripts:
+
+- **A rejecting trigger cannot log its own firing** — the `raise exception` rolls back the trigger's own `INSERT`, so the log is empty whether it fired or never ran, and those are opposite conclusions. Sequences are the exception to transactionality; the firing count moved to one.
+- **`storage.protect_delete()` in a teardown is a trap.** The SQL editor runs a paste as one transaction, so the failing `delete` rolled back the `drop trigger` statements above it and left the rejecting trigger armed — on `storage.objects`, i.e. blocking uploads to *every* bucket on the project. Both teardowns now guard the delete so the drops always survive.
+- **A results table that `truncate`s on re-run is destroyable**, and duly got destroyed. Durable state (the sequence, `pg_trigger`, `pg_policies`) was what actually settled things.
+
+### Where to resume
+- **The open decision is the user's:** signed upload URLs (recommended) versus the fixed trigger. `0006_file_blobs_to_storage.sql` cannot be written until it is made — the quota mechanism is most of the migration.
+- **Everything else in 7b-2 is now unblocked** and its shape is known: one private bucket, `security definer` publish lookup, the mandatory Storage-API deletion sweep, the upsert-aware quota arithmetic (if the trigger route wins), and a deliberate `cacheControl` per upload.
+- **Not carried forward:** the orphan probe. Re-runnable in ~10 minutes (enable S3 keys, install the AWS CLI, redo P1 steps 4–6) if the decision turns on it.
+
+---
+
 ## 2026-07-28 — ADR-036: local storage will buffer cloud writes (journal promoted to 7c); IndexedDB-as-staging-area rejected
 
 Discussion only — **no code**. Manual verification of the reworked autosave came back clean (rapid points and rapid deletes both persist; the "Leave site?" dialog appears only when you beat the window, which is the guard working). That closed the acute bug and opened the structural question behind it.
