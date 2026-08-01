@@ -15,9 +15,13 @@
 
 Supabase provides Postgres + Auth + Storage in one pre-integrated service.
 
-- **The GeoJSON blob lives in Supabase Storage**, as an object in a private `user-files` bucket at `{user_id}/{file_id}.geojson`. `public.user_files` keeps identity, name, and timestamps and is a **metadata row**.
+- **A file is a snapshot plus deltas — neither half is the file on its own** ([ADR-037](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired)). This is the load-bearing rule of the storage design; see §4a.
+- **The snapshot lives in Supabase Storage**, as an object in a private `user-files` bucket at `{user_id}/{file_id}.geojson`. Written **rarely**, at checkpoints. `public.user_files` keeps identity, name, timestamps, and the snapshot's watermark, and is a **metadata row**.
+- **The deltas live in Postgres** as a small, bounded change buffer — one row per feature touched since the last snapshot, written on **every edit**. Emptied at each checkpoint.
 - **Auth** issues JWTs the SPA uses directly.
-- **Postgres** holds everything that is *not* the blob: file metadata, settings KV, plans/entitlements.
+- **Postgres** holds everything that is *not* the snapshot: file metadata, the delta buffer, settings KV, plans/entitlements.
+
+> **Changed 2026-08-01 — [ADR-037](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired).** ADR-035 moved the blob out of Postgres but kept **whole-document writes** — every edit burst re-uploaded the entire file, up to 50 MB. That was judged unacceptable for a paid product, and it is a **data-model** problem no change of vendor reaches. ADR-037 splits the write path: the snapshot stays where ADR-035 put it, and edits become **feature-level deltas** in Postgres. The cost of an edit no longer depends on the size of the file. Two mechanisms designed under ADR-035 are **withdrawn**: Node-issued signed upload URLs (quota no longer needs checking before a write, so [ADR-002](02-decisions.md#adr-002--client-direct-access-with-rls-not-a-node-wrapper)'s client-direct writes are restored) and the whole-document local journal of [ADR-036](02-decisions.md#adr-036--local-storage-buffers-cloud-writes-the-recovery-journal-is-promoted-indexeddb-as-a-staging-area-is-rejected) (now an outbox for undelivered deltas).
 
 > **Changed 2026-07-27 — [ADR-035](02-decisions.md#adr-035--the-geojson-blob-moves-to-supabase-storage-user_files-becomes-a-metadata-row).** Phases 2–7a stored the blob **inline** in a `jsonb` column, with Storage "held in reserve… only if files become large enough." That reserve was called in the hard way: a **43 MB** file crashed the entire Supabase project (PostgREST OOMs materialising the payload — `520` on the write, `521` on the read-back), twice, while the anonymous IndexedDB path handled the same file fine. The blow-up happens **upstream of Postgres**, so no trigger, `CHECK`, or policy could guard it, and a client-side cap is bypassable by request replay ([ADR-033](02-decisions.md#adr-033--no-server-side-geojson-content-validation-integrity-via-quota-and-tos)). The move also removes the read ceiling and the per-edit TOAST/WAL write amplification. **Authorization is unchanged in kind** — still client-direct, still RLS — the boundary simply extends to `storage.objects`, keyed on the owner path prefix.
 
@@ -30,12 +34,44 @@ The Vue app talks to Supabase **directly** via `supabase-js`. Per-user authoriza
 - A thin Node layer may be added **later, selectively**, only for operations that need server-enforced business rules — most likely **payments/entitlements/quotas**. Not for general CRUD.
 - **RLS is the security boundary.** Every table holding user data must scope every operation to `auth.uid() = user_id`. This is the single most security-critical surface in the epic.
 
+## 4a. Snapshot + deltas — how a save actually works
+
+[ADR-037](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired). **Both storage paths use this model** — cloud and local/anonymous alike, so there is one model rather than one interface with two semantics.
+
+Two writes with unrelated jobs, instead of one number trying to serve both:
+
+| | Written | Where | Cost |
+|---|---|---|---|
+| **Delta** | every edit | Postgres change buffer | hundreds of bytes |
+| **Snapshot** | at checkpoints | Storage object (cloud) / IndexedDB (local) | the whole document |
+
+**Reading a file** — cold load, or opening it on another device:
+
+1. Download the snapshot (one fetch).
+2. Fetch delta rows above the snapshot's watermark (a small query — usually a few rows).
+3. Apply each by feature id: replace, or remove.
+
+The reading client is then holding the current document and may checkpoint immediately, which cleans up after whichever session left the deltas behind. **The system tidies itself by being used.**
+
+**Checkpointing is not a merge.** The client already holds the finished document — that is what the user is looking at — so a checkpoint is *"upload what you are holding, mark it as the new base."* No fetch of the old snapshot, no replay, and **nothing server-side ever materialises the document**, which is what stops ADR-035's crash returning by another route.
+
+Four rules, each load-bearing:
+
+- **Deltas are assignments, never instructions.** *"Feature X is now this"* / *"feature X is gone"* — never *"move feature X three metres north."* This makes replay **idempotent**, makes ordering **per-feature** rather than global, and lets the buffer **deduplicate by feature id**, so it grows with features *touched*, not edits *made*.
+- **Failure ordering:** upload the snapshot → record the watermark → delete the deltas it covers. The watermark is what stops a checkpoint deleting edits made *while it was uploading*.
+- **A checkpoint may only delete deltas it actually incorporated** — never simply "everything up to now." Without this, two sessions editing the same file silently destroy each other's work (ADR-037, *Consequences*).
+- **Whole-document operations bypass the buffer.** Import, File→New, and bulk operations write a snapshot directly and clear it. General rule: *if the delta would be bigger than the snapshot, just write the snapshot.*
+
+**The invariant, which every code path must honour:** *a file is snapshot + deltas.* Anything that reads the snapshot object directly and forgets the deltas serves stale data — and fails quietly. Enforced two ways: the seam (§4) is the **single chokepoint** for reading a file and applying an edit, and anything that must read the object directly (publish, export bundles) **forces a checkpoint first**.
+
 ## 4. The storage-provider seam
 
 A small **provider** abstraction sits between the rest of the app and the actual backend, so the app never knows which backend is in use. Both providers live in `src/services/storage/`, organised into `file/` and `settings/` subfolders (each holding that seam plus its local/remote backends). There are two seams:
 
 1. **File seam** — the active GeoJSON blob (today the `geojson_data` / `backup_geojson_data` records). Wraps `dexieStorage` for anonymous users; routes to a Supabase-backed backend when logged in. **The seam is what makes the ADR-035 storage move a one-line change** — the cloud backend is swapped from a `user_files.geojson` provider to a Supabase Storage provider without any consumer knowing, which is exactly the Phase 0 branch-by-abstraction payoff. Per the user's call (2026-07-27) the old Postgres blob provider stays in the repo as commented dead code, **with no feature flag**, until the new path is proven — a *code* fallback only, since the `geojson` column goes stale as soon as files are written to Storage.
 2. **Settings KV seam** — templates/bookmarks/preferences. Today wraps `localStorage`; routes to a Supabase-backed implementation when logged in.
+
+> **The File seam's *interface* changes under [ADR-037](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired) (2026-08-01) — the first time it has.** `getItem`/`setItem` is a **whole-document** shape; deltas need something like `applyChange(delta)` / `getDocument()` / `checkpoint()`. Phase 0's branch-by-abstraction made the ADR-035 storage move a one-line **backend** swap, and it will **not** do the same here, because the shape of the operation changes and not merely its destination. This is the largest single piece of client work in the slice. The seam also becomes the **enforcement point for the snapshot+deltas invariant** (§4a) — the one place that knows a file is two halves.
 
 Both expose the same minimal **method surface** — `getItem(key)`, `setItem(key, value)`, `removeItem(key)`, `clear()` — but they differ in timing, and that difference is load-bearing:
 
@@ -58,21 +94,42 @@ auth.users                       — managed by Supabase Auth
   id (uuid), email, ...
 
 public.user_files                -- METADATA ONLY (ADR-035); the bytes live in Storage
-  id            uuid primary key
-  user_id       uuid references auth.users(id)   -- RLS scope
-  name          text
-  created_at    timestamptz
-  updated_at    timestamptz
+  id             uuid primary key
+  user_id        uuid references auth.users(id)  -- RLS scope
+  name           text
+  snapshot_seq   bigint                          -- WATERMARK (ADR-037): the highest delta
+                                                 -- sequence the current snapshot contains.
+                                                 -- Reads fetch deltas above it; checkpoints
+                                                 -- advance it AFTER the object upload lands.
+  created_at     timestamptz
+  updated_at     timestamptz
   -- geojson jsonb  -- REMOVED (ADR-035, Phase 7b). Kept unwritten during the
   --                -- dead-code overlap, then dropped. The FeatureCollection is
   --                -- now an object at user-files/{user_id}/{file_id}.geojson
 
-storage.objects (Supabase-managed)              -- the blob store
+public.file_deltas               -- THE CHANGE BUFFER (ADR-037) -- bounded, not a mirror.
+  seq           bigserial        -- global, monotonic; the ordering + watermark key
+  file_id       uuid references user_files(id) on delete cascade
+  user_id       uuid references auth.users(id)  -- RLS scope (denormalised for the policy)
+  feature_id    text not null    -- TEXT, not uuid: app ids are uuidv4, gl-draw's fallback
+                                 -- is a 32-char nanoid, and user-supplied ids from an
+                                 -- imported file are preserved verbatim (ADR-037)
+  op            text not null    -- 'upsert' | 'delete' -- ASSIGNMENTS, never instructions
+  feature       jsonb            -- the whole new feature for 'upsert'; null for 'delete'
+  created_at    timestamptz
+  -- unique (file_id, feature_id): the buffer DEDUPLICATES -- twenty edits to one feature
+  -- collapse to one row, so it grows with features TOUCHED, not edits MADE.
+  -- Emptied at every checkpoint, so it is never a copy of the file. This is deliberately
+  -- NOT `file_features` (one permanent row per feature) -- see ADR-037's rejected list.
+
+storage.objects (Supabase-managed)              -- the snapshot store
   bucket_id = 'user-files'                       -- private bucket, explicit file_size_limit
   name      = '{user_id}/{file_id}.geojson'      -- owner prefix is the RLS key
   metadata->>'size'                              -- the ONLY authoritative byte count;
                                                  -- a client-written size column would be
-                                                 -- spoofable by request replay (ADR-033)
+                                                 -- spoofable by request replay (ADR-033).
+                                                 -- NOTE it measures the SNAPSHOT, which lags
+                                                 -- the live document between checkpoints.
 
 public.user_settings
   user_id       uuid references auth.users(id)
