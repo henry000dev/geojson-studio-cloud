@@ -2,7 +2,7 @@
 
 Living operational procedures for the Cloud epic — privileged/manual tasks run against the **Supabase** project via the SQL Editor. This is distinct in genre from the design/decision docs alongside it (`00`–`05`, which record *why*); this records *how to do* recurring ops tasks.
 
-> **Not here:** running the billing stack locally (`.env.local`, Stripe CLI, `npm run local`) and the `STRIPE_PRICE_*` env wiring live in the **API repo**'s `README.md` → *Development → Local Billing & Webhooks*. Applying and verifying migrations lives in [`../supabase/migrations/README.md`](../supabase/migrations/README.md).
+> **Not here:** running the billing stack locally (`.env.local`, Stripe CLI, `npm run local`) and the `STRIPE_PRICE_*` env wiring live in the **API repo**'s `README.md` → *Development → Local Billing & Webhooks*. Applying and verifying migrations lives in [`../supabase/migrations/README.md`](../supabase/migrations/README.md). **Wiping non-prod back to zero** for a clean test run lives in [`RESET.md`](RESET.md) — a development procedure, not an operational one, and it deletes every account.
 
 The SQL Editor executes as a privileged role that **bypasses RLS**, so these writes succeed even though `user_plans` is read-only to clients (ADR-022). Before running anything, confirm which project you are on — **non-prod vs prod**.
 
@@ -95,4 +95,28 @@ where user_id = '<auth-user-uuid>';
 
 ---
 
-_See also: [`02-decisions.md`](02-decisions.md) ADR-022 / ADR-031 (plan model) · ADR-034 (hidden/comp/paid plans + the premium axis), and [`../supabase/migrations/README.md`](../supabase/migrations/README.md) (applying + verifying `0005`)._
+## File storage — where a user's bytes actually live
+
+> Added 2026-08-01 with [ADR-037](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired) / migration `0006`. **Read this before touching anyone's file data by hand.**
+
+**A FILE IS A SNAPSHOT PLUS DELTAS. Neither half is the file on its own.**
+
+| Half | Where | Written |
+|---|---|---|
+| **Snapshot** — the whole `FeatureCollection` | Storage object, private bucket `user-files`, at `{user_id}/{file_id}.geojson` | rarely, at checkpoints |
+| **Deltas** — one row per feature touched since | `public.file_edits`, deduped on `(file_id, feature_id)` | every edit |
+| **Watermark** — which deltas the snapshot contains | `public.user_files.snapshot_seq` | after each checkpoint's upload lands |
+
+Three consequences for anyone poking at this in the dashboard:
+
+1. **Downloading the object does not give you the user's file.** It gives you the file as of the last checkpoint. Anything in `file_edits` above `snapshot_seq` is missing from it. To reconstruct: take the object, then apply each delta above the watermark by `feature_id` — `upsert` replaces (or appends), `delete` removes.
+2. **Never delete `file_edits` rows to "tidy up".** A row above the watermark is the only copy of that edit. The buffer is emptied by checkpoints, which happen on their own; a buffer that looks large just means the file has not been opened or idled recently.
+3. **Deleting a user does NOT delete their objects.** `on delete cascade` cannot reach Storage, and `storage.protect_delete()` rejects a direct SQL `DELETE` on `storage.objects` with `42501`. The `{user_id}/` prefix sweep on `POST /api/v1/account/delete`, via the Storage API, is the only mechanism — **a compliance obligation, not a cleanup nicety.** `file_edits` cascades normally.
+
+**Usage figures lag.** `public.user_storage_usage` measures the **snapshot**, so it under-reports between checkpoints and jumps when one lands. That is by design (ADR-037's growth rule means nothing is refused mid-edit) and it is why the account page's usage bar is UX rather than a gate. A user reporting "my usage doesn't match my files" is almost always seeing this.
+
+**The per-file ceiling is `50000000` bytes (decimal 50 MB), uniform across all tiers** — a guardrail, not a plan lever. It is enforced by the bucket's `file_size_limit`, at the edge. Do not raise it above the project's global upload limit; on the free plan those are the same number.
+
+---
+
+_See also: [`02-decisions.md`](02-decisions.md) ADR-022 / ADR-031 (plan model) · ADR-034 (hidden/comp/paid plans + the premium axis) · ADR-035 / ADR-037 (file storage), and [`../supabase/migrations/README.md`](../supabase/migrations/README.md) (applying + verifying `0005` and `0006`)._

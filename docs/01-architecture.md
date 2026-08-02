@@ -59,10 +59,27 @@ Four rules, each load-bearing:
 
 - **Deltas are assignments, never instructions.** *"Feature X is now this"* / *"feature X is gone"* — never *"move feature X three metres north."* This makes replay **idempotent**, makes ordering **per-feature** rather than global, and lets the buffer **deduplicate by feature id**, so it grows with features *touched*, not edits *made*.
 - **Failure ordering:** upload the snapshot → record the watermark → delete the deltas it covers. The watermark is what stops a checkpoint deleting edits made *while it was uploading*.
-- **A checkpoint may only delete deltas it actually incorporated** — never simply "everything up to now." Without this, two sessions editing the same file silently destroy each other's work (ADR-037, *Consequences*).
+- **The watermark advances to the top of the unbroken run, never to `max(incorporated)`** ([ADR-037 addendum 2](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired)). `snapshot_seq` is a scalar and cannot express a set with a hole in it, so a session holding `{11,12,13,15}` writes **13**, not 15 — otherwise every future reader skips 14, another session's edit. Readers re-apply 15 harmlessly, because deltas are assignments. The watermark update is also a **compare-and-set** against the base the checkpoint read: a session that loses replaced nothing and **must not delete any deltas**.
+- **A checkpoint may only delete deltas it actually incorporated** — never simply "everything up to now." A session's incorporated set is `{seqs fetched at open} ∪ {seqs its own writes returned}`, **captured when it serialises the document** so edits made during the upload survive. It must be a **set**, not a high-water mark (`seq <= max` deletes another session's interleaved writes), and must not be a writer/session id (which would delete your own post-serialise writes *and* never clean up deltas inherited at open). The dedup upsert therefore **bumps `seq`** rather than preserving it — which is what makes delete-by-exact-seq safe with no special case: a row another session has since re-edited carries a new `seq`, does not match, and survives. See the [ADR-037 addendum](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired).
 - **Whole-document operations bypass the buffer.** Import, File→New, and bulk operations write a snapshot directly and clear it. General rule: *if the delta would be bigger than the snapshot, just write the snapshot.*
 
 **The invariant, which every code path must honour:** *a file is snapshot + deltas.* Anything that reads the snapshot object directly and forgets the deltas serves stale data — and fails quietly. Enforced two ways: the seam (§4) is the **single chokepoint** for reading a file and applying an edit, and anything that must read the object directly (publish, export bundles) **forces a checkpoint first**.
+
+### Multi-session
+
+**Editing one file from multiple tabs or devices is not supported** (a product position, stated in the UI — [ADR-037 addendum](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired)). It is implemented without machinery to enforce it perfectly:
+
+| Situation | Blocked? | Data | User sees |
+|---|---|---|---|
+| 2nd tab, same browser | **Yes** — Web Lock | nothing at risk | "already open in another tab" + take over |
+| Crashed tab | No — lock auto-released | nothing at risk | opens normally |
+| 2nd device | No | per-feature last-write-wins; nothing else lost | warned on open and on change |
+| Offline → reconnect | No | queued deltas win for the features they touch | silent, unless the file moved on |
+
+- **Same browser** uses the **Web Locks API** (`navigator.locks`) — per-origin, **auto-released when the tab closes or crashes**, so there is no lease table, no heartbeat, no TTL, and no stale-lock problem. Take-over coordinates over `BroadcastChannel`. This covers the case users actually hit.
+- **Cross-device is not locked.** A server lease needs expiry, and any expiry opens a window where a lapsed session returns and writes — which is precisely the offline-outbox flow this design supports, so the two interact badly. Deferred to [`04-backlog.md`](04-backlog.md).
+- **Presence needs no heartbeat:** deltas newer than the snapshot that *this* session did not write mean someone else has been editing. That drives both warnings.
+- **Nothing is destroyed either way**, because of the incorporated-set rule above. On a second device the blast radius is a single feature, against today's whole-document overwrite.
 
 ## 4. The storage-provider seam
 
@@ -107,7 +124,7 @@ public.user_files                -- METADATA ONLY (ADR-035); the bytes live in S
   --                -- dead-code overlap, then dropped. The FeatureCollection is
   --                -- now an object at user-files/{user_id}/{file_id}.geojson
 
-public.file_deltas               -- THE CHANGE BUFFER (ADR-037) -- bounded, not a mirror.
+public.file_edits               -- THE CHANGE BUFFER (ADR-037) -- bounded, not a mirror.
   seq           bigserial        -- global, monotonic; the ordering + watermark key
   file_id       uuid references user_files(id) on delete cascade
   user_id       uuid references auth.users(id)  -- RLS scope (denormalised for the policy)
@@ -119,6 +136,9 @@ public.file_deltas               -- THE CHANGE BUFFER (ADR-037) -- bounded, not 
   created_at    timestamptz
   -- unique (file_id, feature_id): the buffer DEDUPLICATES -- twenty edits to one feature
   -- collapse to one row, so it grows with features TOUCHED, not edits MADE.
+  -- The upsert MUST bump seq (on conflict ... do update set seq = nextval(...)), never
+  -- preserve it: that is what makes a checkpoint's delete-by-exact-seq safe. A row another
+  -- session has since re-edited carries a NEW seq, so it does not match and survives.
   -- Emptied at every checkpoint, so it is never a copy of the file. This is deliberately
   -- NOT `file_features` (one permanent row per feature) -- see ADR-037's rejected list.
 

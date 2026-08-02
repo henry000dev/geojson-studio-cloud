@@ -4,6 +4,178 @@
 
 ---
 
+## 2026-08-02 — first smoke tests pass; non-prod reset to zero
+
+**The slice does the thing it was built to do.** User-run smoke tests on the cloud path:
+
+- **The 43 MB file edits without crashing and without server errors** — the failure that ADR-035 exists to remove, and the reason the whole snapshot+delta model was designed. This is the slice's headline claim and it now has evidence behind it.
+- **Two tabs behave** — the lock, the dialog and the takeover all work against a real second tab.
+- **Rapid point creation is fine**, where it previously was not.
+
+Two rough edges left open by agreement, both to be picked up later: an **occasional "invalid feature" error on refresh** after rapidly creating points (the likeliest suspect is a delta written for a feature gl-draw had not finished assigning an id to — worth checking `deltaFeatureId` returning null against a half-built feature before assuming anything harder), and the pre-existing files that read blank.
+
+The change buffer is `public.file_edits`, named for what a row is to the person who made it rather than for its role in the model, where it is a **delta**. The two words mean the same thing throughout — the model's vocabulary (`delta-model.js`, `delta-session.js`, ADR-037) is unchanged. The local Dexie store matches it (`fileEdits`, schema version 3).
+
+### Non-prod reset to zero
+
+**Everything was nuked and the migration chain replayed from an empty database** — all Storage objects, all `public` tables and functions, and all accounts. Prototype state had accumulated through 7b's two redesigns and there is only one developer, so the cost was zero and it clears out several half-answered questions at once, including the two pre-existing files that read blank (they were the last content in `user_files.geojson`; the question of a read-fallback bridge is now moot and **withdrawn**).
+
+Because a lot of manual testing is coming, the procedure was extracted rather than left inline: **[`docs/RESET.md`](RESET.md)** (the steps, most of which are not SQL) and **[`supabase/scripts/reset-non-prod.sql`](../supabase/scripts/reset-non-prod.sql)** (the SQL, in two selectable sections — *data only* for the everyday loop, *full teardown* when a migration changes).
+
+**The script is deliberately NOT in `supabase/migrations/`.** That directory is applied in filename order and is documented as `supabase db push`-compatible, so a nuke script numbered into it — `9999_`, `0007_`, anything — would eventually run as the last step of a deploy. It lives in `supabase/scripts/`, which nothing applies automatically.
+
+It also carries a **forward-dated guard**: section 0 aborts if `public.production_marker` exists. That table does not exist yet and the check passes silently, so it costs nothing today — the point is that the protection is already in place on the day it starts to matter, rather than being remembered at the moment it is most needed. **Phase 9 provisioning must create that marker before applying any migration**; it is noted in `RESET.md`.
+
+Two things worth knowing before the next reset:
+
+- **Storage objects cannot be deleted in SQL** — `storage.protect_delete()` rejects a direct `DELETE` on `storage.objects` with `42501`, so the dashboard (or the Storage API) is the only route. This is the same constraint that makes the account-deletion sweep mandatory, met here in person rather than in a prototype.
+- **The `auth.users` trigger must be dropped before `public.user_plans`.** `on_auth_user_created` references that table, and dropping it out from under the trigger breaks every future signup rather than failing loudly at drop time.
+
+**The replay is worth more than the cleanup.** These migrations have been amended in place throughout, so the chain had never actually been run end to end against an empty database — and Phase 9 provisioning depends on precisely that. A clean replay is the first evidence it works.
+
+App builds clean; chunking unchanged.
+
+### Where to resume
+
+Everything below still stands except the two-tab test and the 43 MB check (both done) and the blank pre-existing files (gone with the reset). So: **sign up fresh** and re-run the end-to-end path on an empty account, then the account-deletion Storage sweep (unbuilt, a compliance obligation), the kilobytes-not-megabytes measurement, two-account isolation, and the "invalid feature" refresh error.
+
+---
+
+## 2026-08-01 (fourth entry) — `0006` applied and verified; the Web Lock wired
+
+**`0006` is applied to non-prod and all SQL-runnable checks pass**, including the **`seq`-bump stop-work check** (`PASS — the trigger bumped the seq`), the `anon` lockout, and the reworked usage view (a user with 2 files and **0 bytes** — correct, because bytes measure the *snapshot* and none has been uploaded yet).
+
+**One snag in the README's own check, worth keeping.** The first version of the seq probe ran the seed and the upsert as two data-modifying CTEs in one statement and failed with `21000: ON CONFLICT DO UPDATE command cannot affect row a second time`. All CTEs in a statement share one snapshot, so the second write cannot see the row the first inserted — **the seed has to commit before the upsert can conflict with it**. Rewritten as two statements: a plain `INSERT`, then the real upsert with a `before` CTE reading the pre-update snapshot so both seqs are comparable in one result row. Cleanup was moved to a separate run so a trailing `DELETE` cannot swallow the verdict.
+
+### Flagged: existing cloud files read blank
+
+The account's two pre-existing files hold their content in `user_files.geojson`, and the new read path does not look there — it downloads from Storage, finds nothing, finds no deltas, and returns null. **Those files open blank.** Nothing is destroyed (the column is untouched), but the editor will not show them and editing one writes a fresh snapshot over the top.
+
+**A read-fallback to the old column was deliberately NOT added.** It would be about ten lines and would die in 7b-3 anyway, but during the exact phase where the Storage path is being proven, a silent fallback would make a **broken upload look like a working read**. The recommendation instead is to `select geojson from user_files`, keep the text, and re-import through the app — which writes it properly to Storage and doubles as the first real end-to-end test. Offer stands if the user would rather have the bridge.
+
+### The Web Lock, wired
+
+Both UX calls settled by the user, both the recommended option:
+
+- **Second tab → blocked with a dialog.** The file is **not loaded**: the editor stays empty behind `FileLockedDialog`, so nobody is ever drawing on a document that was never theirs to save. Buttons: **My Files** / **Take over**.
+- **After takeover, the old tab → read-only with a banner**, document still on screen. Nothing vanishing while the user looks at it.
+
+New: `constants/file-lock-constants.js`, `stores/file-lock.js`, `components/file/FileLockedDialog.vue`. Wired in `MapView.vue` (acquire before `initialiseFile`, a watch that turns the superseded tab read-only, reload-after-takeover), `AppStatusbar.vue` (the banner + Reload, extending the existing Read-Only indicator rather than inventing a new surface), and `stores/auth.js` (release on sign-out, beside the delta-session clear).
+
+**Three decisions inside it worth not re-litigating:**
+
+- **"Go to the other tab" is not offered**, though it was the obvious third button. There is no reliable way to focus another tab from script — `window.focus()` on a tab the user has not just interacted with is ignored by every current browser. **A button that silently does nothing is worse than no button**, so the message names the situation and lets the user switch tabs themselves.
+- **The lock is acquired BEFORE the file loads**, which meant resolving the active file earlier than the seam would have. `ensureResolved()` is idempotent and runs its query once, so this costs nothing — and it is the only ordering where "blocked" can mean *never loaded* rather than *loaded then taken away*.
+- **`close-on-escape` is set explicitly to false.** The dialog has no close button and its `v-model` setter is a no-op, so an Escape that got through would hide it **without changing the state that renders it** — leaving a blank editor with no way back. Cheap belt-and-braces rather than trusting PrimeVue's closable/escape coupling.
+
+**The takeover handshake, and why it is clean here in a way a server lease never is:** both tabs are alive and can talk. The departing tab **checkpoints, then releases, then goes read-only** — so nothing is stranded in its buffer — where a lease takeover can only assume the previous holder is gone and hope it left nothing behind. The checkpoint is best-effort: if it fails the deltas are still durable and the arriving tab reconstructs from them, and refusing to hand over because a tidy-up failed would strand the user in the other tab. The 15 s takeover timeout is generous on purpose, because the departing tab may be uploading a large snapshot on its way out.
+
+**Note the boundary-checkpoint finding from the previous entry does *not* apply here.** That one was about a file switch racing a *different* document into the draw manager. A yielding tab keeps its document and goes read-only, so there is no incoming load to race — the checkpoint is safe and genuinely useful.
+
+### Where to resume
+
+1. **Rescue the two existing files** (or accept losing them), then the **first real end-to-end run**: import → edit → reload → export on the cloud path. Nothing in the app has yet executed against a live `file_edits` row or a real Storage object.
+2. **Two-tab test:** second tab refused; take over; old tab goes read-only; crashed tab (kill it) leaves no stale lock.
+3. **Still unbuilt and a compliance obligation:** the `{user_id}/` Storage sweep on `POST /api/v1/account/delete`.
+4. Then the rest of 7b-2's confirm-as-you-go list — the 43 MB file, the kilobytes-not-megabytes check, two-account isolation on `storage.objects` **and** `file_edits`.
+
+---
+
+
+## 2026-08-01 (third entry) — 7b-2 BUILD BEGINS: `0006` written, the delta model and both backends built, edit sites emitting deltas
+
+**First code of the slice.** The migration is written but **not yet applied** — that is the user's next action. App builds clean; the Supabase SDK is still out of the main bundle (`supabase-client` remains its own chunk).
+
+### What landed
+
+**Cloud repo — `supabase/migrations/0006_snapshot_and_deltas.sql`** (new): the private `user-files` bucket (`public = false`, `file_size_limit` **50000000**, MIME sanity list), four owner-only `storage.objects` policies keyed on the `{user_id}/` path prefix, **`public.file_edits`** (`seq bigserial`, `feature_id` **text**, unique on `(file_id, feature_id)`, owner-only RLS), **`user_files.snapshot_seq`**, and `user_storage_usage` reworked to read Storage bytes via a full outer join with a **regex guard** on the path segment (prototype P2's finding — an exception inside the view would break the usage read for everyone). The migrations README gains a verification block, including a **stop-work check on the `seq` bump**.
+
+> **The `seq` bump lives in a `BEFORE UPDATE` trigger, not in the statement.** PostgREST builds its own `on conflict do update set …` from the columns it is given and cannot be made to call `nextval()`. A trigger gets the same result from any writer, which is the safer home for an invariant this load-bearing anyway.
+
+**App repo** — the model, both backends, the seam, and the edit sites:
+
+- **`delta-model.js`** (new, pure — no I/O): `applyDeltas` (the read half), `dedupeDeltas`, `deltaFeatureId`, and **`reconcileDeltas`**.
+- **`delta-session.js`** (new): the incorporated-seq bookkeeping, the contiguous watermark, and the presence signal.
+- **`remote-file-storage.js`**: rewritten around Storage + `file_edits`. `getDocument` / `applyChanges` / `checkpoint` / `writeDocument` / `clearDocument`. The old Postgres blob path is retained as commented dead code, no flag, per the 2026-07-27 call.
+- **`browser-file-storage.js`**: the same model in Dexie (schema **v3**, `fileEdits: "++seq, &[fileId+featureId], fileId"`). No upgrade callback needed — an existing record is a complete snapshot with no deltas outstanding, which *is* watermark 0 and an empty buffer.
+- **`file-storage.js`**: the seam, now the enforcement point for the invariant.
+- **`auto-save-service.js`**: rewritten to emit deltas and schedule checkpoints.
+- **`undo-redo-service.js`**: `undo()`/`redo()` now return `{ operationType, affectedIds }`.
+- **`draw-manager.js`**: all eight `scheduleSave()` call sites now report the features they touched; `loadGeoJsonFile` re-baselines the reconciler.
+- **`file-lock.js`** (new): the Web Locks + `BroadcastChannel` mechanism. **Not yet wired to any UI** — see *Where to resume*.
+
+### The four findings worth keeping
+
+**1. The watermark has the same trap as the delete predicate, and nobody had noticed.** The addendum written yesterday establishes that a checkpoint's delete must be a **set**, never `seq <= max`. But `snapshot_seq` **is a scalar**, and it advertises the same information to readers — so writing `max(incorporated)` reintroduces the identical bug at the other end: a session holding `{11,12,13,15}` claiming 15 makes every future reader **skip 14**. The fix is to advance only to the top of the unbroken run (**13**), after which readers re-fetch 15 and apply it twice — **harmless precisely because deltas are assignments.** *This is the second place that rule has paid for itself, and neither payoff was anticipated when it was chosen.* Recorded as [ADR-037 addendum 2](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired).
+
+**2. The delete rule protects the deltas but not the snapshot — a checkpoint needs a compare-and-set too.** The incorporated-set delete stops A destroying B's *delta rows*. It says nothing about the *object*: B, holding a base A has already replaced, would upload its document over A's snapshot wholesale. So the watermark update carries `where snapshot_seq = <the base I read>`, and **a checkpoint that loses the CAS must not delete any deltas.** Nothing is lost when it loses — the deltas keep flowing, the buffer just is not tidied by that session.
+
+**3. Checkpointing on file switch / sign-out is wrong, not merely expensive — withdrawn.** It was on the planned trigger list. A checkpoint reads the current document *out of the draw manager*, and a file switch is about to load a **different** document into that same draw manager: un-awaited, it uploads the incoming file's contents as the **outgoing file's snapshot**. Awaiting it instead blocks the switch on a whole-document upload and buys nothing, because the deltas are already durable. **Idle + buffer-width are the triggers**, plus the mandatory checkpoint before anything reads the object directly. The flush at those boundaries is untouched and still load-bearing.
+
+**4. A safety net was added that the plan did not have, because the failure it prevents is silent.** Edit sites report what they touched — the precise signal, and ADR-037 was right that the app already knows it. But there are twenty-odd draw modes, and *auditing every one once is not the same as keeping every one correct forever*; a site that forgets to report would have its edit vanish at the next checkpoint with nothing to notice at the time. So `reconcileDeltas` also compares the document's feature-id set against the last persisted one: **an id that appeared is an upsert, an id that vanished is a delete**, regardless of what anyone reported. Costs `O(features)` in Set operations — no serialising, no deep compare. **The one gap it cannot close** is a *modification* to a still-present feature that nobody reported, since catching that needs the whole-document compare this design exists to remove. That gap is why **undo/redo now return their affected ids**: undoing a geometry move is exactly that shape, and it was the one real hole.
+
+### Deviations from the plan, all deliberate
+
+- **7b-1's adaptive coalescing window was deleted now rather than in 7b-3.** `lastSaveDurationMs`, `lastSaveIsCheap()`, `SAVE_IS_CHEAP_BELOW_MS` and the leading-edge branch all priced a trade — data loss against bandwidth — that stops existing once an edit is durable for a few hundred bytes. Leaving it would have meant shipping a mechanism whose entire documented rationale is void. A plain 250 ms rate limit remains. **The two durable lessons are kept verbatim in the file**: price a window by what a save costs, not by which path it takes; and never treat a page-hide flush as the reason a window is safe to widen.
+- **Page-hide now flushes deltas and deliberately does *not* checkpoint.** For the first time the teardown write is small enough to have a realistic chance of landing. It is still not a guarantee.
+- **The Web Lock service is built but not wired.** The mechanism is the hard part and is done; the dialog ("already open in another tab" + go-to-it / take-over) and read-only mode are UI with product decisions in them. Left inert rather than half-wired — nothing calls it, so there is no broken state.
+
+### Verification so far
+
+- `npm run build` clean; `supabase-client` still a separate chunk.
+- The two pure modules were exercised directly against **13 assertions**, including the two-device race end to end: A opens at 10, writes 13 and 15, B writes 14 — A's captured set is `{13,15}`, **14 is never deleted**, the watermark advances to **10** (not 15), and an edit written during the upload stays owed to the next checkpoint. Replaying the same deltas twice is proven to be a no-op.
+- **Not run:** the e2e suite (the user runs it), and nothing at all against a live Supabase project — `0006` has not been applied.
+
+### Where to resume
+
+1. **Apply `0006` to non-prod** and work through the migrations README verification block. **The `seq`-bump check is a stop-work**: if an updated row comes back with the same seq, the trigger did not fire and a checkpoint would delete a row another session had re-edited.
+2. **Wire the Web Lock** — the dialog, take-over, and read-only mode.
+3. **Then the confirm-as-you-go list** in rollout 7b-2: a 43 MB file imports/edits/reloads/exports without taking the project down; an edit burst on a 40 MB file uploads **kilobytes**; two-account isolation on `storage.objects` **and** `file_edits`; account deletion leaves no objects (the sweep on `POST /api/v1/account/delete` is **still unbuilt** and is a compliance obligation).
+4. **Still open from before:** whether the usage figure shows snapshot bytes or snapshot + pending deltas (built as **snapshot bytes**, the simpler call — it is UX, not a gate); the 7a behavioural confirm-as-you-go checks.
+
+**Two verifications from the previous entry are now closed, both by code trace.** Duplicate feature ids **block** rather than warn — `file-service.js:146` throws on import, `GeometryAddDialog.vue:219` blocks the add path — which is what the delta model needs, since two features sharing an id make a delta ambiguous. And ids are **not user-editable**: the root `id` is never surfaced in the UI, and the preserved copy at `properties[geojsonstudio-user-supplied-id]` is hidden from the properties editor by `filterOutSystemProperties`. Noted while there: `getFeatureId()` accepts `ID`/`Id`/`iD` while GL Draw keys on lowercase `id`, so the delta path uses `feature.id` alone, as ADR-037 requires.
+
+---
+
+
+## 2026-08-01 (second entry) — multi-session settled: a Web Lock for tabs, no server lease, safe delete retained
+
+**Discussion only — no code.** The one item ADR-037 left open is closed. Recorded as the [ADR-037 addendum](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired).
+
+**The user's framing was a product one and it's the right call:** *editing the same file from multiple tabs or devices is not supported*, said plainly in the UI, with support as a possible later feature. The question I was asked was whether locking would let us delete the concurrency machinery and get back to autosave faster.
+
+**The answer was "mostly yes, but not the bit you'd expect."**
+
+**The safe delete does not cost anything, so locking it away saves nothing.** A checkpoint has to know which deltas to remove regardless — so the safe and unsafe forms are the same code with a different `WHERE`. Dropping it would save zero lines while shipping a known data-loss path, and it is forward-compatible: add a lease later and the defensive branch just stops firing. The reverse — unsafe now, lease later — means relying on a lock being perfect to cover a bug we chose to keep. **This is the one thing I pushed back on and the user accepted it.**
+
+**A server lease is not airtight, and its leak is a flow we already committed to.** Any lease needs an expiry or a crashed tab locks a user out of their own file. Any expiry opens a window where a lapsed session returns and writes — which is **exactly the offline-outbox drain**. So lease and outbox interact badly by construction, and a lease would not even let the divergence guard be deleted, because take-over recreates the same divergence. Deferred to the backlog.
+
+**Where the real simplification was: split by *where* the second session is.**
+- **Same browser** — the **Web Locks API** is a genuine lock and genuinely cheap. Per-origin, and the browser **auto-releases on tab close or crash**: no lease column, no heartbeat, no TTL, and no stale-lock problem, which is the thing that makes server leases tiresome. Take-over coordinates over `BroadcastChannel`. **This is the case users actually hit** — one person, forgotten second tab.
+- **Cross-device** — warned, not blocked. Nothing is destroyed (the safe delete), and the blast radius is a single feature rather than a whole document.
+
+**Presence turned out to be free.** No heartbeat, no lease table: **deltas newer than the snapshot that this session did not write** already mean someone else has been editing. That drives both warnings — on open and on write/checkpoint.
+
+**Then the mechanics question — "how does a tab know which edits it wrote?" — which was sharper than it looked.** The identity is the delta's `seq`, returned by Postgres on write. Three details, each wrong in its obvious form:
+
+1. **Capture the set when the document is *serialised*,** not when the upload completes — otherwise edits made during the upload get deleted.
+2. **A set, not a high-water mark.** A opens at 10 and writes 13, B writes 14, A writes 15 → A's set is `{11,12,13,15}` and never included 14, which `seq <= 15` would delete.
+3. **Not a writer/session id.** It would delete the session's own post-serialise writes, *and* never clean up deltas inherited at open — so the buffer would accumulate orphans forever. This one looks like the obvious simplification and is the worst of the three.
+
+**And a schema consequence that makes the whole thing work:** the dedup upsert must **bump `seq`**, never preserve it. That is what makes delete-by-exact-seq safe with no special case — a row another session has since re-edited carries a new `seq`, doesn't match, and survives. **The conservative behaviour falls out of the design rather than being coded for**, which is the sign the seq-set choice is the right one.
+
+**The honest gap, accepted deliberately:** on a second device a user can watch an edit to a shared feature revert after a reload. Bounded to features both people touched, explained by the warnings, and closed properly only by the deferred lease.
+
+**Docs updated:** ADR-037 addendum (product position, Web Lock, deferred lease, the three delete mechanics, the `seq`-bump); architecture §4a gains a *Multi-session* subsection with the behaviour table and the incorporated-set rule, plus a schema note on the upsert; rollout 7b-2 gains the Web Lock and the expanded delete rule, 7c's multi-session item re-scoped to the cross-device warnings, confirm-as-you-go extended (second tab refused, crashed tab leaves no stale lock, cross-device loses nothing); backlog gains a **Multi-session / concurrent editing** section holding the deferred lease.
+
+### Where to resume
+- **Unchanged and still next: `0006_snapshot_and_deltas.sql`.** Nothing is blocked. Add the `seq`-bumping upsert to the shape already recorded.
+- **Multi-session is no longer an open design question** — it is now build work split across 7b-2 (lock + safe delete) and 7c (warnings).
+- **Still outstanding:** checkpoint policy numbers; whether the usage figure shows snapshot bytes or snapshot + pending deltas; the two feature-id verifications (does duplicate detection block or warn; confirm ids are not user-editable); and the 7a behavioural confirm-as-you-go checks.
+
+---
+
+
 ## 2026-08-01 — the 7b-2 rethink returns: ADR-037, a file is a snapshot plus deltas. No vendor change.
 
 **Discussion only — no code, no SQL.** The pause called on 2026-07-31 came back with a **new remedy and the same provider**. Recorded as [ADR-037](02-decisions.md#adr-037--a-file-is-a-snapshot-plus-deltas-whole-document-writes-are-retired); 7b-2 rewritten around it.
@@ -31,10 +203,10 @@
 
 **Rejected, and why it is worth recording:** patching ADR-036's journal with UI ("last saved N minutes ago", staleness indicators). Factually it does not hold — **Safari evicts IndexedDB after 7 days of no interaction**, Chrome evicts under pressure, and for a product whose paid proposition *is* cloud storage, "your work was on your laptop" is not the promise being sold. And on the product's own terms: the stated requirement is that saving be seamless, and a staleness indicator exists precisely to make the user think about saving. **Client-side compression** (measured 6.6× on `taiwan.json`) was **declined by the user** on latency, complexity, and a commercial argument that is the strongest of the three — uncompressed storage fills quotas faster, and quota pressure drives upgrades.
 
-**Docs updated:** ADR-037 added; ADR-035 status (remedy superseded, signed-URL addendum withdrawn, P3 moot), ADR-036 status (journal → delta outbox), ADR-002 (bent then restored — addendum added), ADR-025 (retry classifier's job gets easier; indicator stops tracking staleness); architecture §2, a new §4a, §4 seam note, §5 data model (`file_deltas`, `user_files.snapshot_seq`); rollout 7b-2 rewritten, 7b-1 note superseded, 7b-3 gains the adaptive-window deletion, 7c re-scoped (outbox, network status, multi-session UI); backlog write-granularity **resolved**; overview status + diagram + glossary.
+**Docs updated:** ADR-037 added; ADR-035 status (remedy superseded, signed-URL addendum withdrawn, P3 moot), ADR-036 status (journal → delta outbox), ADR-002 (bent then restored — addendum added), ADR-025 (retry classifier's job gets easier; indicator stops tracking staleness); architecture §2, a new §4a, §4 seam note, §5 data model (`file_edits`, `user_files.snapshot_seq`); rollout 7b-2 rewritten, 7b-1 note superseded, 7b-3 gains the adaptive-window deletion, 7c re-scoped (outbox, network status, multi-session UI); backlog write-granularity **resolved**; overview status + diagram + glossary.
 
 ### Where to resume
-- **Next unit of work: `0006_snapshot_and_deltas.sql`** — the private bucket + `file_deltas` + `snapshot_seq` + the `user_storage_usage` rework. The shape is settled; nothing is blocked on a prototype.
+- **Next unit of work: `0006_snapshot_and_deltas.sql`** — the private bucket + `file_edits` + `snapshot_seq` + the `user_storage_usage` rework. The shape is settled; nothing is blocked on a prototype.
 - **The largest client piece is the seam's interface change** (`applyChange` / `getDocument` / `checkpoint`). First time the seam's *shape* changes rather than its backend, so Phase 0's one-line-swap payoff does **not** apply here.
 - **Open decisions, none blocking:** checkpoint policy numbers (idle timeout, buffer-width threshold); whether the displayed usage figure is snapshot bytes or snapshot + pending deltas.
 - **Two verifications outstanding** (both cheap, neither blocking the migration): does the existing duplicate-feature-id detection **block** an import or merely warn — duplicates go from annoyance to corruption under deltas; and confirm feature ids are not user-editable (the user's assessment is that they are not).
