@@ -40,7 +40,7 @@
 --     failure ADR-035 exists to remove.
 --
 -- 0005's enforce_storage_quota on user_files.geojson is left in place on
--- purpose: the Postgres blob path survives as commented dead code until 7b-3, so
+-- purpose: the Postgres blob path survives as commented dead code until 7b-4, so
 -- both paths keep an enforced quota during the overlap. It becomes a no-op the
 -- moment nothing writes that column, and is dropped with it.
 

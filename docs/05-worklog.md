@@ -35,9 +35,19 @@ Two things worth knowing before the next reset:
 
 App builds clean; chunking unchanged.
 
+### A fourth 7b sub-slice: 7b-3 "harden"; cleanup becomes 7b-4
+
+The smoke tests turned *"is the new path sound?"* from an open question into a short, specific list — one bug, one unbuilt compliance obligation, and a verification list that had never been run. That work had **no home**: it would have leaked into 7c and blurred where the large-file fix ends. So **7b-3 — harden** was inserted and the old 7b-3 (cleanup) renumbered to **7b-4**.
+
+**The ordering is the whole point.** 7b-4 deletes the Postgres blob path and drops `user_files.geojson` — it removes the escape route. Running it while issues are still being found gets that backwards. 7b-2's cleanup step was already gated on *"after the new path is proven"*; this slice is what proving it actually looks like, rather than a phrase nobody was assigned.
+
+**The account-deletion Storage sweep was put here rather than in 7c**, despite living in the api repo and having nothing to do with deltas. The obligation **did not exist before this slice** — deleting a user used to cascade everything automatically, and the Storage move is what created the gap. Filing it under general loose ends would separate the gap from its cause and let it drift past beta, which is the one thing a compliance item must not do.
+
+Also corrected while renumbering: **7b-1's adaptive coalescing window was already deleted in 7b-2**, pulled forward because the new save path could not be written around machinery it contradicts. Three docs still described it as future work in the cleanup slice.
+
 ### Where to resume
 
-Everything below still stands except the two-tab test and the 43 MB check (both done) and the blank pre-existing files (gone with the reset). So: **sign up fresh** and re-run the end-to-end path on an empty account, then the account-deletion Storage sweep (unbuilt, a compliance obligation), the kilobytes-not-megabytes measurement, two-account isolation, and the "invalid feature" refresh error.
+**7b-3.** Sign up fresh on the empty project and re-run the end-to-end path, then: the **"invalid feature" refresh error** (the only functional bug so far), the **account-deletion Storage sweep** (unbuilt, compliance), the **kilobytes-not-megabytes measurement** (the slice's central claim, still unmeasured), **two-account isolation** on `storage.objects` and `file_edits`, and **7b-1's outstanding e2e re-run** — cheaper here than carried, since 7b-2 replaced the machinery that rework was tuning.
 
 ---
 
